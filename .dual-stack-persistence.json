@@ -1,0 +1,9 @@
+{
+  "persistence": "memory",
+  "abbr": "AS",
+  "ext": ".proj",
+  "appId": "AgentStatistics",
+  "rootNamespace": "AgentStatistics",
+  "displayName": "Agent Statistics",
+  "formDemo": false
+}
