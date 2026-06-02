@@ -17,7 +17,7 @@ public sealed partial class Settings : global::System.Configuration.ApplicationS
     /// <summary>界面显示名称。</summary>
     [global::System.Configuration.ApplicationScopedSettingAttribute()]
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
-    [global::System.Configuration.DefaultSettingValueAttribute("Agent Statistics")]
+    [global::System.Configuration.DefaultSettingValueAttribute("AgentStatistics")]
     public string AppDisplayName
     {
         get => ((string)(this["AppDisplayName"]));

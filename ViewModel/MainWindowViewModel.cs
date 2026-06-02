@@ -121,7 +121,7 @@ public sealed class MainWindowViewModel : ViewModelBase
         _snapshotNoticeShown = true;
         MessageBox.Show(
             $"会话数据已保存至：\n{snapPath}\n\n下次启动将自动恢复（memory 模式，无工程文件菜单）。",
-            "Agent Statistics",
+            "AgentStatistics",
             MessageBoxButton.OK,
             MessageBoxImage.Information);
     }

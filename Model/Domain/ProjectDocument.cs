@@ -10,7 +10,7 @@ public sealed class ProjectDocument
     /// </summary>
     public ProjectDocument()
     {
-        DisplayName = "Agent Statistics";
+        DisplayName = "AgentStatistics";
     }
 
     /// <summary>界面显示名称。</summary>

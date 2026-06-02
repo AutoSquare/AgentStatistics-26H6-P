@@ -21,12 +21,17 @@ public static partial class CompositionRoot
     public static SampleCalculationService SampleCalculationService =>
         Services.GetRequiredService<SampleCalculationService>();
 
+    /// <summary>Codex 用量统计服务。</summary>
+    public static CodexUsageService CodexUsageService =>
+        Services.GetRequiredService<CodexUsageService>();
+
     private static IServiceProvider Build()
     {
         var c = new ServiceCollection();
         c.AddSingleton<CalculationRunCoordinator>();
         c.AddSingleton<PythonBridge>();
         c.AddSingleton<SampleCalculationService>();
+        c.AddSingleton<CodexUsageService>();
         return c.BuildServiceProvider();
     }
 }

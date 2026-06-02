@@ -3,7 +3,7 @@
   <Profiles />
   <Settings>
     <Setting Name="AppDisplayName" Type="System.String" Scope="Application">
-      <Value Profile="(Default)">Agent Statistics</Value>
+      <Value Profile="(Default)">AgentStatistics</Value>
     </Setting>
   </Settings>
 </SettingsFile>

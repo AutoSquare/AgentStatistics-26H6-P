@@ -121,7 +121,7 @@ public sealed class ProjectSession
     private static ProjectDocument CreateDefaultDocument()
     {
         var doc = new ProjectDocument();
-        doc.DataTables["项目基本信息"] = "[{\"键\":\"app\",\"值\":\"Agent Statistics\"}]";
+        doc.DataTables["项目基本信息"] = "[{\"键\":\"app\",\"值\":\"AgentStatistics\"}]";
         doc.MaterialTables["示例材料"] = "[{\"索引\":1,\"名称\":\"示例材料\"}]";
         return doc;
     }

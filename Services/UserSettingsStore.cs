@@ -89,6 +89,36 @@ public static class UserSettingsStore
         Save(dict);
     }
 
+    /// <summary>
+    /// 读取 Codex sessions 目录；缺省为当前用户目录下的 .codex/sessions。
+    /// </summary>
+    /// <returns>Codex sessions 目录路径。</returns>
+    public static string LoadCodexSessionsPath()
+    {
+        var settings = Load();
+        if (settings.TryGetValue("codexSessionsPath", out var value) &&
+            value.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace(value.GetString()))
+        {
+            return value.GetString()!;
+        }
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".codex",
+            "sessions");
+    }
+
+    /// <summary>
+    /// 保存 Codex sessions 目录。
+    /// </summary>
+    /// <param name="path">Codex sessions 目录路径。</param>
+    public static void SaveCodexSessionsPath(string path)
+    {
+        var dict = ToMutableDictionary(Load());
+        dict["codexSessionsPath"] = path;
+        Save(dict);
+    }
+
     private static Dictionary<string, object?> ToMutableDictionary(IReadOnlyDictionary<string, JsonElement> settings)
     {
         var dict = new Dictionary<string, object?>(StringComparer.Ordinal);
