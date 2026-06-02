@@ -13,6 +13,9 @@ public static class UserSettingsStore
     public static string AppDataDirectory =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "AgentStatistics");
 
+    /// <summary>WebView2 用户数据目录，避免在程序安装目录写缓存。</summary>
+    public static string WebView2UserDataDirectory => Path.Combine(AppDataDirectory, "WebView2");
+
     /// <summary>用户设置文件路径。</summary>
     public static string SettingsFilePath => Path.Combine(AppDataDirectory, "user_settings.json");
 

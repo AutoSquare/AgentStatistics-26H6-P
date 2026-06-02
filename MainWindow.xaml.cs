@@ -2,6 +2,7 @@ using System.Windows;
 using AgentStatistics.Services;
 using AgentStatistics.ViewModel;
 using Microsoft.Web.WebView2.Core;
+using Microsoft.Web.WebView2.Wpf;
 using System.IO;
 using System.Text.Json;
 using System.Windows.Threading;
@@ -66,6 +67,7 @@ public partial class MainWindow : Window
     {
         try
         {
+            ConfigureWebView2UserDataFolder();
             await DashboardWebView.EnsureCoreWebView2Async().ConfigureAwait(true);
             DashboardWebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
             var indexPath = FindDashboardIndexPath();
@@ -88,6 +90,16 @@ public partial class MainWindow : Window
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
         }
+    }
+
+    private void ConfigureWebView2UserDataFolder()
+    {
+        if (DashboardWebView.CoreWebView2 is not null)
+            return;
+
+        Directory.CreateDirectory(UserSettingsStore.WebView2UserDataDirectory);
+        DashboardWebView.CreationProperties ??= new CoreWebView2CreationProperties();
+        DashboardWebView.CreationProperties.UserDataFolder = UserSettingsStore.WebView2UserDataDirectory;
     }
 
     private static string? FindDashboardIndexPath()
