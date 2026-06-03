@@ -7,10 +7,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <ApplicationIcon>Resources\icons\logo.ico</ApplicationIcon>
-    <Version>25.6.2.2</Version>
-    <AssemblyVersion>25.6.2.2</AssemblyVersion>
-    <FileVersion>25.6.2.2</FileVersion>
-    <InformationalVersion>25.6.2.2</InformationalVersion>
+    <Version>26.6.3.1</Version>
+    <AssemblyVersion>26.6.3.1</AssemblyVersion>
+    <FileVersion>26.6.3.1</FileVersion>
+    <InformationalVersion>26.6.3.1</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Company>AutoSquare</Company>
     <Product>AgentStatistics</Product>
