@@ -22,12 +22,16 @@ const statusMessage = ref("等待宿主连接");
 const codexRootDraft = ref("");
 const codexData = ref(null);
 const sidebarWidth = ref(loadSidebarWidth());
+const workspace = ref(null);
 const trendChart = ref(null);
 const distributionChart = ref(null);
 const costChart = ref(null);
+const chartWidth = ref(0);
 let trendInstance = null;
 let distributionInstance = null;
 let costInstance = null;
+let resizeObserver = null;
+let resizeFrame = 0;
 const pageTitle = computed(() => {
     if (activePage.value === "codex")
         return "Codex 用量统计";
@@ -36,6 +40,16 @@ const pageTitle = computed(() => {
     return "跨 Agent 总计";
 });
 const currentView = computed(() => codexData.value?.views?.[activeRange.value] ?? codexData.value?.views?.history ?? null);
+const chartView = computed(() => {
+    if (!currentView.value)
+        return null;
+    if (activeRange.value !== "history" || !codexData.value)
+        return currentView.value;
+    return {
+        ...currentView.value,
+        ...buildHistoryCharts(codexData.value.records, currentView.value.range.start, currentView.value.range.end, chartWidth.value)
+    };
+});
 onMounted(() => {
     onHostMessage((message) => {
         if (message.type === "settings" && typeof message.codexRoot === "string") {
@@ -50,15 +64,28 @@ onMounted(() => {
             statusKind.value = "idle";
             statusMessage.value = "已同步 Codex 用量";
         }
+        if (message.type === "dashboardResize") {
+            scheduleChartResize();
+        }
     });
     postToHost({ type: "ready" });
-    window.addEventListener("resize", resizeCharts);
+    window.addEventListener("resize", scheduleChartResize);
+    resizeObserver = new ResizeObserver(scheduleChartResize);
+    [workspace.value, trendChart.value, distributionChart.value, costChart.value].forEach((element) => {
+        if (element)
+            resizeObserver?.observe(element);
+    });
+    scheduleChartResize();
 });
 onBeforeUnmount(() => {
-    window.removeEventListener("resize", resizeCharts);
+    window.removeEventListener("resize", scheduleChartResize);
+    resizeObserver?.disconnect();
+    resizeObserver = null;
+    if (resizeFrame)
+        cancelAnimationFrame(resizeFrame);
     stopResize();
 });
-watch(currentView, () => {
+watch(chartView, () => {
     void renderCharts();
 });
 watch(activePage, () => {
@@ -67,21 +94,21 @@ watch(activePage, () => {
 async function renderCharts() {
     await nextTick();
     await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-    if (!currentView.value || activePage.value !== "codex")
+    if (!chartView.value || activePage.value !== "codex")
         return;
     if (trendChart.value) {
         trendInstance = ensureChartInstance(trendChart.value, trendInstance);
-        trendInstance.setOption(trendOption(currentView.value), true);
+        trendInstance.setOption(trendOption(chartView.value), true);
     }
     if (distributionChart.value) {
         distributionInstance = ensureChartInstance(distributionChart.value, distributionInstance);
-        distributionInstance.setOption(distributionOption(currentView.value), true);
+        distributionInstance.setOption(distributionOption(chartView.value), true);
     }
     if (costChart.value) {
         costInstance = ensureChartInstance(costChart.value, costInstance);
-        costInstance.setOption(costOption(currentView.value), true);
+        costInstance.setOption(costOption(chartView.value), true);
     }
-    resizeCharts();
+    scheduleChartResize();
 }
 function ensureChartInstance(element, instance) {
     if (instance && instance.getDom() === element)
@@ -90,9 +117,18 @@ function ensureChartInstance(element, instance) {
     return echarts.init(element);
 }
 function resizeCharts() {
+    chartWidth.value = Math.max(trendChart.value?.clientWidth ?? 0, distributionChart.value?.clientWidth ?? 0);
     trendInstance?.resize();
     distributionInstance?.resize();
     costInstance?.resize();
+}
+function scheduleChartResize() {
+    if (resizeFrame)
+        cancelAnimationFrame(resizeFrame);
+    resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = 0;
+        resizeCharts();
+    });
 }
 function refresh() {
     postToHost({ type: "refresh" });
@@ -132,6 +168,68 @@ function priceRecord(row) {
     const reasoning = row[6] || 0;
     return (input * rule.input + cached * rule.cached + (output + reasoning) * rule.output) / 1_000_000;
 }
+function buildHistoryCharts(records, start, end, width) {
+    const rows = records.filter((row) => row[0] >= start && row[0] <= end);
+    const granularity = chooseHistoryGranularity(start, end, targetBucketCount(width));
+    const bucketMap = new Map();
+    for (const row of rows) {
+        const ts = bucketStart(row[0], granularity);
+        const bucket = bucketMap.get(ts) ??
+            {
+                trend: [ts, 0, 0, 0, 0, 0, 0, 0],
+                distribution: [ts, 0, 0, 0]
+            };
+        const cost = priceRecord(row);
+        bucket.trend[1] += row[7] || 0;
+        bucket.trend[2] += row[4] || 0;
+        bucket.trend[3] += row[5] || 0;
+        bucket.trend[4] += row[3] || 0;
+        bucket.trend[5] += row[6] || 0;
+        bucket.trend[6] += 1;
+        bucket.trend[7] += cost;
+        bucket.distribution[1] += row[7] || 0;
+        bucket.distribution[2] += 1;
+        bucket.distribution[3] += cost;
+        bucketMap.set(ts, bucket);
+    }
+    const buckets = Array.from(bucketMap.values()).sort((a, b) => a.trend[0] - b.trend[0]);
+    return {
+        axisGranularity: granularity,
+        trend: buckets.map((bucket) => [bucket.trend[0], bucket.trend[1], bucket.trend[2], bucket.trend[3], bucket.trend[4], bucket.trend[5], bucket.trend[6], Number(bucket.trend[7].toFixed(6))]),
+        distribution: buckets.map((bucket) => [bucket.distribution[0], bucket.distribution[1], bucket.distribution[2], Number(bucket.distribution[3].toFixed(6))])
+    };
+}
+function targetBucketCount(width) {
+    const safeWidth = width > 0 ? width : 900;
+    return Math.max(36, Math.min(180, Math.round(safeWidth / 10)));
+}
+function chooseHistoryGranularity(start, end, targetBuckets) {
+    const duration = Math.max(1, end - start);
+    if (Math.ceil(duration / 3_600_000) <= targetBuckets)
+        return "hour";
+    if (Math.ceil(duration / 86_400_000) <= targetBuckets)
+        return "day";
+    if (monthSpan(start, end) <= targetBuckets)
+        return "month";
+    return "year";
+}
+function bucketStart(ts, granularity) {
+    const date = new Date(ts);
+    if (granularity === "year")
+        return new Date(date.getFullYear(), 0, 1).getTime();
+    if (granularity === "month")
+        return new Date(date.getFullYear(), date.getMonth(), 1).getTime();
+    if (granularity === "day")
+        return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+    if (granularity === "hour")
+        return new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours()).getTime();
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours(), date.getMinutes()).getTime();
+}
+function monthSpan(start, end) {
+    const startDate = new Date(start);
+    const endDate = new Date(end);
+    return Math.max(1, (endDate.getFullYear() - startDate.getFullYear()) * 12 + endDate.getMonth() - startDate.getMonth() + 1);
+}
 function csvCell(value) {
     const text = String(value ?? "");
     return /[",\r\n]/.test(text) ? `"${text.replaceAll("\"", "\"\"")}"` : text;
@@ -155,7 +253,7 @@ function startResize(event) {
 function resizeSidebar(event) {
     sidebarWidth.value = clampSidebarWidth(event.clientX);
     persistSidebarWidth();
-    resizeCharts();
+    scheduleChartResize();
 }
 function stopResize() {
     document.body.classList.remove("is-resizing-sidebar");
@@ -173,7 +271,7 @@ function resizeWithKeyboard(event) {
     else
         sidebarWidth.value = clampSidebarWidth(sidebarWidth.value + (event.key === "ArrowRight" ? 12 : -12));
     persistSidebarWidth();
-    resizeCharts();
+    scheduleChartResize();
 }
 debugger; /* PartiallyEnd: #3632/scriptSetup.vue */
 const __VLS_ctx = {};
@@ -247,9 +345,11 @@ __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.d
 });
 __VLS_asFunctionalElement(__VLS_intrinsicElements.main, __VLS_intrinsicElements.main)({
     id: "main-content",
+    ref: "workspace",
     ...{ class: "workspace" },
     tabindex: "-1",
 });
+/** @type {typeof __VLS_ctx.workspace} */ ;
 __VLS_asFunctionalElement(__VLS_intrinsicElements.header, __VLS_intrinsicElements.header)({
     ...{ class: "topbar" },
 });
@@ -708,6 +808,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             codexRootDraft: codexRootDraft,
             codexData: codexData,
             sidebarWidth: sidebarWidth,
+            workspace: workspace,
             trendChart: trendChart,
             distributionChart: distributionChart,
             costChart: costChart,

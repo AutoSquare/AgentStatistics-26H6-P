@@ -17,6 +17,7 @@ public partial class MainWindow : Window
     private readonly MainWindowViewModel _viewModel;
     private readonly CodexUsageService _codexUsageService = CompositionRoot.CodexUsageService;
     private readonly DispatcherTimer _refreshDebounceTimer;
+    private readonly DispatcherTimer _dashboardResizeTimer;
     private FileSystemWatcher? _codexWatcher;
     private CancellationTokenSource? _scanCts;
     private bool _scanRunning;
@@ -30,8 +31,12 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         Loaded += OnMainWindowLoaded;
+        SizeChanged += OnDashboardHostResized;
+        StateChanged += OnDashboardHostStateChanged;
         _refreshDebounceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(900) };
         _refreshDebounceTimer.Tick += OnRefreshDebounceTick;
+        _dashboardResizeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(160) };
+        _dashboardResizeTimer.Tick += OnDashboardResizeTimerTick;
         _viewModel = CompositionRoot.BuildViewModel();
         DataContext = _viewModel;
         ApplicationBootstrap.OnStartup(_viewModel);
@@ -81,11 +86,12 @@ public partial class MainWindow : Window
                 Path.GetDirectoryName(indexPath)!,
                 CoreWebView2HostResourceAccessKind.Allow);
             DashboardWebView.Source = new Uri("https://app.agentstatistics.local/index.html");
+            QueueDashboardResize();
         }
         catch (WebView2RuntimeNotFoundException ex)
         {
             MessageBox.Show(
-                "未检测到 WebView2 Runtime，请安装 Microsoft Edge WebView2 Runtime 后重新启动。\n\n" + ex.Message,
+                "安装包未能自动准备 WebView2 Runtime，请重新运行完整安装包或联系维护人员处理。\n\n" + ex.Message,
                 "AgentStatistics",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
@@ -100,6 +106,37 @@ public partial class MainWindow : Window
         Directory.CreateDirectory(UserSettingsStore.WebView2UserDataDirectory);
         DashboardWebView.CreationProperties ??= new CoreWebView2CreationProperties();
         DashboardWebView.CreationProperties.UserDataFolder = UserSettingsStore.WebView2UserDataDirectory;
+    }
+
+    private void OnDashboardHostResized(object? sender, EventArgs e)
+    {
+        QueueDashboardResize();
+    }
+
+    private void OnDashboardHostStateChanged(object? sender, EventArgs e)
+    {
+        QueueDashboardResize();
+    }
+
+    private void QueueDashboardResize()
+    {
+        _dashboardResizeTimer.Stop();
+        _dashboardResizeTimer.Start();
+    }
+
+    private void OnDashboardResizeTimerTick(object? sender, EventArgs e)
+    {
+        _dashboardResizeTimer.Stop();
+        ForceDashboardLayout();
+        PostJson("""{"type":"dashboardResize"}""");
+    }
+
+    private void ForceDashboardLayout()
+    {
+        UpdateLayout();
+        DashboardWebView.InvalidateMeasure();
+        DashboardWebView.InvalidateArrange();
+        DashboardWebView.UpdateLayout();
     }
 
     private static string? FindDashboardIndexPath()

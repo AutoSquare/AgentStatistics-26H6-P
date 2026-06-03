@@ -29,8 +29,8 @@ public static class ApplicationBootstrap
         var placement = UserSettingsStore.LoadWindowPlacement();
         if (placement.Width is > 200 && placement.Height is > 150)
         {
-            window.Width = placement.Width.Value;
-            window.Height = placement.Height.Value;
+            window.Width = Math.Max(placement.Width.Value, window.MinWidth);
+            window.Height = Math.Max(placement.Height.Value, window.MinHeight);
         }
         if (placement.Left.HasValue && placement.Top.HasValue)
         {
@@ -55,8 +55,8 @@ public static class ApplicationBootstrap
             ? new Rect(window.Left, window.Top, window.Width, window.Height)
             : window.RestoreBounds;
         UserSettingsStore.SaveWindowPlacement(
-            bounds.Width,
-            bounds.Height,
+            Math.Max(bounds.Width, window.MinWidth),
+            Math.Max(bounds.Height, window.MinHeight),
             bounds.Left,
             bounds.Top,
             window.WindowState.ToString());

@@ -25,6 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
 CACHE_VERSION = 6
 MIN_READABLE_CACHE_VERSION = 4
 DAY_MS = 24 * 60 * 60 * 1000
+HOUR_MS = 60 * 60 * 1000
 
 
 @dataclass
@@ -536,6 +537,63 @@ def build_buckets(events: list[dict[str, Any]], start: int, end: int, step: int)
     return trend, distribution
 
 
+def choose_history_granularity(start: int, end: int, target_buckets: int) -> str:
+    duration = max(1, end - start)
+    if math.ceil(duration / HOUR_MS) <= target_buckets:
+        return "hour"
+    if math.ceil(duration / DAY_MS) <= target_buckets:
+        return "day"
+    if month_span(start, end) <= target_buckets:
+        return "month"
+    return "year"
+
+
+def choose_axis_granularity(duration: int) -> str:
+    if duration <= DAY_MS:
+        return "minute"
+    if duration <= 3 * DAY_MS:
+        return "hour"
+    return "day"
+
+
+def month_span(start: int, end: int) -> int:
+    start_date = from_unix_ms(start).astimezone()
+    end_date = from_unix_ms(end).astimezone()
+    return max(1, (end_date.year - start_date.year) * 12 + end_date.month - start_date.month + 1)
+
+
+def calendar_bucket_start(ts: int, granularity: str) -> int:
+    date = from_unix_ms(ts).astimezone()
+    if granularity == "year":
+        bucket = date.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif granularity == "month":
+        bucket = date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif granularity == "day":
+        bucket = date.replace(hour=0, minute=0, second=0, microsecond=0)
+    else:
+        bucket = date.replace(minute=0, second=0, microsecond=0)
+    return unix_ms(bucket)
+
+
+def build_calendar_buckets(events: list[dict[str, Any]], granularity: str) -> tuple[list[list[Any]], list[list[Any]]]:
+    buckets: dict[int, dict[str, Any]] = {}
+    for event in events:
+        ts = calendar_bucket_start(int(event["ts"]), granularity)
+        bucket = buckets.setdefault(
+            ts,
+            {"ts": ts, "usage": {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "reasoning_output_tokens": 0, "total_tokens": 0}, "calls": 0, "cost": 0.0},
+        )
+        usage = event["usage"]
+        for key in bucket["usage"]:
+            bucket["usage"][key] += int(usage.get(key) or 0)
+        bucket["calls"] += 1
+        bucket["cost"] += float(price_usage(event.get("model") or "unknown", usage)["total"])
+    rows = [buckets[key] for key in sorted(buckets)]
+    trend = [[b["ts"], b["usage"]["total_tokens"], b["usage"]["cached_input_tokens"], b["usage"]["output_tokens"], b["usage"]["input_tokens"], b["usage"]["reasoning_output_tokens"], b["calls"], round(b["cost"], 6)] for b in rows]
+    distribution = [[b["ts"], b["usage"]["total_tokens"], b["calls"], round(b["cost"], 6)] for b in rows]
+    return trend, distribution
+
+
 def in_range(rows: list[dict[str, Any]], start: int, end: int) -> list[dict[str, Any]]:
     timestamps = [row["ts"] for row in rows]
     left = bisect.bisect_left(timestamps, start)
@@ -662,7 +720,15 @@ def build_view(key: str, label: str, start: int, end: int, loaded: dict[str, Any
     cache_hit = (totals["cached_input_tokens"] / totals["input_tokens"] * 100) if totals["input_tokens"] else 0
     success_rate, failure_rate = success_failure_rates(calls, len(failures))
     duration = max(1, end - start)
-    trend, distribution = build_buckets(events, start, end, choose_nice_step(duration, 180))
+    if key == "history":
+        axis_granularity = choose_history_granularity(start, end, 120)
+        trend, distribution = build_calendar_buckets(events, axis_granularity)
+        trend_step_minutes = None
+    else:
+        axis_granularity = choose_axis_granularity(duration)
+        trend_step = choose_nice_step(duration, 180)
+        trend, distribution = build_buckets(events, start, end, trend_step)
+        trend_step_minutes = trend_step / 60_000
     peak_total, peak_ts = peak_rate(events)
     sessions = sorted(by_session.values(), key=lambda row: row["tokens"], reverse=True)[:20]
     max_session_tokens = max([1] + [row["tokens"] for row in sessions])
@@ -740,7 +806,8 @@ def build_view(key: str, label: str, start: int, end: int, loaded: dict[str, Any
         },
         "cost": {"total": costs["total"], "average": costs["total"] / calls if calls else 0, "rangeTokensLabel": fmt_int(totals["total_tokens"]), "parts": cost_parts(costs), "unpricedTokens": costs["unpricedTokens"]},
         "trend": trend,
-        "trendStepMinutes": choose_nice_step(duration, 180) / 60_000,
+        "trendStepMinutes": trend_step_minutes,
+        "axisGranularity": axis_granularity,
         "distribution": distribution,
         "sessions": session_out,
         "models": model_out,

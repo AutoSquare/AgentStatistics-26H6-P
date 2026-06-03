@@ -5,31 +5,18 @@ using System.Text;
 namespace AgentStatistics.Services;
 
 /// <summary>
-/// 与 Python 运行时之间的过桥：子进程、AS_WORKSPACE 环境变量、标准输入输出。
+/// Bridge between WPF and Python: child process, workspace environment, and
+/// redirected standard streams.
 /// </summary>
 public sealed class PythonBridge
 {
     private readonly CalculationRunCoordinator _coordinator;
 
-    /// <summary>
-    /// 初始化 Python 过桥服务。
-    /// </summary>
-    /// <param name="coordinator">计算会话协调器。</param>
     public PythonBridge(CalculationRunCoordinator coordinator)
     {
         _coordinator = coordinator ?? throw new ArgumentNullException(nameof(coordinator));
     }
 
-    /// <summary>
-    /// 启动 Python 解释器执行指定脚本。
-    /// </summary>
-    /// <param name="scriptRelativeToPyFolder">相对于 ASPy 的脚本路径。</param>
-    /// <param name="workspaceRoot">写入环境变量 AS_WORKSPACE 的工作区根路径。</param>
-    /// <param name="stdinLines">写入标准输入的行序列。</param>
-    /// <param name="onStdoutLine">标准输出按行回调。</param>
-    /// <param name="cancellationToken">取消标记。</param>
-    /// <returns>子进程退出码。</returns>
-    /// <exception cref="OperationCanceledException">取消且子进程已终止时抛出。</exception>
     public async Task<int> RunScriptAsync(
         string scriptRelativeToPyFolder,
         string workspaceRoot,
@@ -86,14 +73,13 @@ public sealed class PythonBridge
         var scriptPath = Path.Combine(AppPaths.PyFolder, scriptRelativeToPyFolder);
         if (!File.Exists(AppPaths.PythonExe))
         {
-            var envDir = Path.Combine(AppPaths.Root, AppPaths.EnvFolderName);
-            var hint = Directory.Exists(envDir)
-                ? $"Python 解释器不存在：{AppPaths.PythonExe}"
-                : $"未找到 {AppPaths.EnvFolderName} 目录。请运行 setup_python_env.py 创建虚拟环境后重新生成项目。";
+            var hint = Directory.Exists(AppPaths.EnvFolder)
+                ? $"Development Python venv exists, but no Python executable was found: {AppPaths.PythonExe}"
+                : $"Missing portable Python environment at {AppPaths.EnvFolder}. Run setup_python_env.py to create {AppPaths.EnvFolderName}.";
             throw new FileNotFoundException(hint, AppPaths.PythonExe);
         }
         if (!File.Exists(scriptPath))
-            throw new FileNotFoundException("未找到脚本。", scriptPath);
+            throw new FileNotFoundException("Python script was not found.", scriptPath);
         return scriptPath;
     }
 

@@ -68,6 +68,7 @@ export interface CodexView {
   key: string;
   label: string;
   range: { start: number; end: number };
+  axisGranularity?: "minute" | "hour" | "day" | "month" | "year";
   summary: UsageSummary;
   cost: CostSummary;
   trend: Array<[number, number, number, number, number, number, number, number]>;

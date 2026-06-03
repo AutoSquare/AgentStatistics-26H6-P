@@ -1,5 +1,6 @@
 const axisLabel = { color: "#64748b", fontSize: 11 };
-const grid = { top: 26, right: 18, bottom: 28, left: 52 };
+const valueAxisLabel = { ...axisLabel, formatter: formatCompactNumber };
+const grid = { top: 28, right: 18, bottom: 34, left: 8, containLabel: true };
 export function trendOption(view) {
     const rows = view.trend ?? [];
     return {
@@ -7,8 +8,8 @@ export function trendOption(view) {
         tooltip: { trigger: "axis", valueFormatter: (value) => Number(value).toLocaleString() },
         legend: { top: 0, right: 0, textStyle: { color: "#475569" } },
         grid,
-        xAxis: { type: "category", data: rows.map((row) => formatTime(row[0])), axisLabel },
-        yAxis: { type: "value", axisLabel },
+        xAxis: { type: "category", data: rows.map((row) => formatTime(row[0], view.axisGranularity)), axisLabel },
+        yAxis: { type: "value", axisLabel: valueAxisLabel },
         series: [
             series("总量", rows.map((row) => row[1])),
             series("缓存", rows.map((row) => row[2])),
@@ -25,10 +26,10 @@ export function distributionOption(view) {
         tooltip: { trigger: "axis" },
         legend: { top: 0, right: 0, textStyle: { color: "#475569" } },
         grid,
-        xAxis: { type: "category", data: rows.map((row) => formatTime(row[0])), axisLabel },
+        xAxis: { type: "category", data: rows.map((row) => formatTime(row[0], view.axisGranularity)), axisLabel },
         yAxis: [
-            { type: "value", axisLabel },
-            { type: "value", axisLabel }
+            { type: "value", axisLabel: valueAxisLabel },
+            { type: "value", axisLabel: valueAxisLabel }
         ],
         series: [
             { name: "Token", type: "bar", data: rows.map((row) => row[1]), barMaxWidth: 18, itemStyle: { borderRadius: [4, 4, 0, 0] } },
@@ -63,8 +64,35 @@ function series(name, data) {
         areaStyle: name === "总量" ? { opacity: 0.08 } : undefined
     };
 }
-function formatTime(ts) {
+function formatTime(ts, granularity = "minute") {
     const date = new Date(ts);
-    return `${date.getHours().toString().padStart(2, "0")}:${date.getMinutes().toString().padStart(2, "0")}`;
+    const yyyy = date.getFullYear().toString();
+    const mm = (date.getMonth() + 1).toString().padStart(2, "0");
+    const dd = date.getDate().toString().padStart(2, "0");
+    const hh = date.getHours().toString().padStart(2, "0");
+    const min = date.getMinutes().toString().padStart(2, "0");
+    if (granularity === "year")
+        return yyyy;
+    if (granularity === "month")
+        return `${yyyy}-${mm}`;
+    if (granularity === "day")
+        return `${mm}-${dd}`;
+    if (granularity === "hour")
+        return `${mm}-${dd} ${hh}:00`;
+    return `${hh}:${min}`;
+}
+function formatCompactNumber(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number))
+        return "";
+    const abs = Math.abs(number);
+    if (abs >= 100_000_000)
+        return `${trimNumber(number / 100_000_000)}亿`;
+    if (abs >= 10_000)
+        return `${trimNumber(number / 10_000)}万`;
+    return Math.round(number).toLocaleString();
+}
+function trimNumber(value) {
+    return value.toFixed(value >= 10 ? 0 : 1).replace(/\.0$/, "");
 }
 //# sourceMappingURL=charts.js.map

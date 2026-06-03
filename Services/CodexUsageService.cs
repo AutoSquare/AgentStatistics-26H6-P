@@ -22,7 +22,10 @@ public sealed class CodexUsageService
         if (!File.Exists(scriptPath))
             throw new FileNotFoundException("未找到 Codex 统计脚本。", scriptPath);
 
-        var pythonExe = ResolvePythonExecutable();
+        if (!File.Exists(AppPaths.PythonExe))
+            throw new FileNotFoundException(
+                $"Missing portable Python environment at {AppPaths.EnvFolder}. Run setup_python_env.py to create {AppPaths.EnvFolderName}.",
+                AppPaths.PythonExe);
         var cachePath = Path.Combine(UserSettingsStore.AppDataDirectory, "codex_usage_cache.json");
         Directory.CreateDirectory(UserSettingsStore.AppDataDirectory);
 
@@ -30,8 +33,8 @@ public sealed class CodexUsageService
         {
             StartInfo = new ProcessStartInfo
             {
-                FileName = pythonExe.fileName,
-                Arguments = $"{pythonExe.prefixArgs} -u \"{scriptPath}\" --root \"{sessionsPath}\" --cache \"{cachePath}\"",
+                FileName = AppPaths.PythonExe,
+                Arguments = $"-u \"{scriptPath}\" --root \"{sessionsPath}\" --cache \"{cachePath}\"",
                 WorkingDirectory = AppPaths.PyFolder,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
@@ -67,13 +70,6 @@ public sealed class CodexUsageService
 
         using var _ = JsonDocument.Parse(stdout);
         return stdout;
-    }
-
-    private static (string fileName, string prefixArgs) ResolvePythonExecutable()
-    {
-        if (File.Exists(AppPaths.PythonExe))
-            return (AppPaths.PythonExe, string.Empty);
-        return ("py", "-3");
     }
 
     private static void TryKill(Process proc)

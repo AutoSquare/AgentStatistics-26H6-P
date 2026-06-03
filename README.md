@@ -19,6 +19,8 @@ AgentStatistics 是一个面向 Windows 桌面的本地 AI Agent 用量统计工
 - 桌面端：WPF、.NET 8、WebView2、MVVM
 - 前端：Vue 3、Vite、TypeScript、ECharts、Lucide Vue
 - 统计层：Python，位于 `ASPy/`
+- 发布运行时：便携 Python 3.10.11，位于 `ASEnv/`；`ASEnv` 必须是可移植环境，不能是 venv
+- WebView2 运行时：安装包携带 Microsoft Evergreen Standalone Installer，目标机缺失时由安装器静默安装
 - 持久化：memory 模式，窗口布局、路径设置和会话快照写入 `%AppData%/AgentStatistics/`
 
 ## 快速开始
@@ -45,6 +47,8 @@ cd ..
 dotnet build
 dotnet run
 ```
+
+发布前先准备 `ASEnv/` 便携运行时，并确认其中没有 `pyvenv.cfg` 或开发机绝对路径；安装包还必须携带 `ThirdParty/WebView2/MicrosoftEdgeWebView2RuntimeInstallerX64.exe`，不能要求最终用户手动安装 WebView2。
 
 也可以在 Visual Studio 中打开 `AgentStatistics.sln`，按 F5 启动。
 

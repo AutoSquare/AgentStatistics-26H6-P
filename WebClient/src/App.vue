@@ -30,7 +30,7 @@
       @keydown="resizeWithKeyboard"
     ></div>
 
-    <main id="main-content" class="workspace" tabindex="-1">
+    <main id="main-content" ref="workspace" class="workspace" tabindex="-1">
       <header class="topbar">
         <div>
           <h1>{{ pageTitle }}</h1>
@@ -220,6 +220,7 @@ import * as echarts from "echarts";
 import { Activity, Database, Download, FileText, FolderInput, Layers3, RefreshCw, TriangleAlert } from "@lucide/vue";
 import { onHostMessage, postToHost } from "./host";
 import { costOption, distributionOption, trendOption } from "./charts";
+import type { ChartView, TimeGranularity } from "./charts";
 import type { CodexPayload, CodexView, StatusKind } from "./types";
 
 const navItems = [
@@ -243,12 +244,16 @@ const statusMessage = ref("等待宿主连接");
 const codexRootDraft = ref("");
 const codexData = ref<CodexPayload | null>(null);
 const sidebarWidth = ref(loadSidebarWidth());
+const workspace = ref<HTMLElement | null>(null);
 const trendChart = ref<HTMLElement | null>(null);
 const distributionChart = ref<HTMLElement | null>(null);
 const costChart = ref<HTMLElement | null>(null);
+const chartWidth = ref(0);
 let trendInstance: echarts.ECharts | null = null;
 let distributionInstance: echarts.ECharts | null = null;
 let costInstance: echarts.ECharts | null = null;
+let resizeObserver: ResizeObserver | null = null;
+let resizeFrame = 0;
 
 const pageTitle = computed(() => {
   if (activePage.value === "codex") return "Codex 用量统计";
@@ -257,6 +262,14 @@ const pageTitle = computed(() => {
 });
 
 const currentView = computed<CodexView | null>(() => codexData.value?.views?.[activeRange.value] ?? codexData.value?.views?.history ?? null);
+const chartView = computed<ChartView | null>(() => {
+  if (!currentView.value) return null;
+  if (activeRange.value !== "history" || !codexData.value) return currentView.value;
+  return {
+    ...currentView.value,
+    ...buildHistoryCharts(codexData.value.records, currentView.value.range.start, currentView.value.range.end, chartWidth.value)
+  };
+});
 
 onMounted(() => {
   onHostMessage((message) => {
@@ -272,17 +285,28 @@ onMounted(() => {
       statusKind.value = "idle";
       statusMessage.value = "已同步 Codex 用量";
     }
+    if (message.type === "dashboardResize") {
+      scheduleChartResize();
+    }
   });
   postToHost({ type: "ready" });
-  window.addEventListener("resize", resizeCharts);
+  window.addEventListener("resize", scheduleChartResize);
+  resizeObserver = new ResizeObserver(scheduleChartResize);
+  [workspace.value, trendChart.value, distributionChart.value, costChart.value].forEach((element) => {
+    if (element) resizeObserver?.observe(element);
+  });
+  scheduleChartResize();
 });
 
 onBeforeUnmount(() => {
-  window.removeEventListener("resize", resizeCharts);
+  window.removeEventListener("resize", scheduleChartResize);
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+  if (resizeFrame) cancelAnimationFrame(resizeFrame);
   stopResize();
 });
 
-watch(currentView, () => {
+watch(chartView, () => {
   void renderCharts();
 });
 
@@ -293,20 +317,20 @@ watch(activePage, () => {
 async function renderCharts() {
   await nextTick();
   await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  if (!currentView.value || activePage.value !== "codex") return;
+  if (!chartView.value || activePage.value !== "codex") return;
   if (trendChart.value) {
     trendInstance = ensureChartInstance(trendChart.value, trendInstance);
-    trendInstance.setOption(trendOption(currentView.value), true);
+    trendInstance.setOption(trendOption(chartView.value), true);
   }
   if (distributionChart.value) {
     distributionInstance = ensureChartInstance(distributionChart.value, distributionInstance);
-    distributionInstance.setOption(distributionOption(currentView.value), true);
+    distributionInstance.setOption(distributionOption(chartView.value), true);
   }
   if (costChart.value) {
     costInstance = ensureChartInstance(costChart.value, costInstance);
-    costInstance.setOption(costOption(currentView.value), true);
+    costInstance.setOption(costOption(chartView.value), true);
   }
-  resizeCharts();
+  scheduleChartResize();
 }
 
 function ensureChartInstance(element: HTMLElement, instance: echarts.ECharts | null) {
@@ -316,9 +340,18 @@ function ensureChartInstance(element: HTMLElement, instance: echarts.ECharts | n
 }
 
 function resizeCharts() {
+  chartWidth.value = Math.max(trendChart.value?.clientWidth ?? 0, distributionChart.value?.clientWidth ?? 0);
   trendInstance?.resize();
   distributionInstance?.resize();
   costInstance?.resize();
+}
+
+function scheduleChartResize() {
+  if (resizeFrame) cancelAnimationFrame(resizeFrame);
+  resizeFrame = requestAnimationFrame(() => {
+    resizeFrame = 0;
+    resizeCharts();
+  });
 }
 
 function refresh() {
@@ -361,6 +394,69 @@ function priceRecord(row: [number, string, string, number, number, number, numbe
   return (input * rule.input + cached * rule.cached + (output + reasoning) * rule.output) / 1_000_000;
 }
 
+function buildHistoryCharts(records: CodexPayload["records"], start: number, end: number, width: number) {
+  const rows = records.filter((row) => row[0] >= start && row[0] <= end);
+  const granularity = chooseHistoryGranularity(start, end, targetBucketCount(width));
+  const bucketMap = new Map<number, { trend: [number, number, number, number, number, number, number, number]; distribution: [number, number, number, number] }>();
+
+  for (const row of rows) {
+    const ts = bucketStart(row[0], granularity);
+    const bucket =
+      bucketMap.get(ts) ??
+      {
+        trend: [ts, 0, 0, 0, 0, 0, 0, 0],
+        distribution: [ts, 0, 0, 0]
+      };
+    const cost = priceRecord(row);
+    bucket.trend[1] += row[7] || 0;
+    bucket.trend[2] += row[4] || 0;
+    bucket.trend[3] += row[5] || 0;
+    bucket.trend[4] += row[3] || 0;
+    bucket.trend[5] += row[6] || 0;
+    bucket.trend[6] += 1;
+    bucket.trend[7] += cost;
+    bucket.distribution[1] += row[7] || 0;
+    bucket.distribution[2] += 1;
+    bucket.distribution[3] += cost;
+    bucketMap.set(ts, bucket);
+  }
+
+  const buckets = Array.from(bucketMap.values()).sort((a, b) => a.trend[0] - b.trend[0]);
+  return {
+    axisGranularity: granularity,
+    trend: buckets.map((bucket) => [bucket.trend[0], bucket.trend[1], bucket.trend[2], bucket.trend[3], bucket.trend[4], bucket.trend[5], bucket.trend[6], Number(bucket.trend[7].toFixed(6))] as [number, number, number, number, number, number, number, number]),
+    distribution: buckets.map((bucket) => [bucket.distribution[0], bucket.distribution[1], bucket.distribution[2], Number(bucket.distribution[3].toFixed(6))] as [number, number, number, number])
+  };
+}
+
+function targetBucketCount(width: number) {
+  const safeWidth = width > 0 ? width : 900;
+  return Math.max(36, Math.min(180, Math.round(safeWidth / 10)));
+}
+
+function chooseHistoryGranularity(start: number, end: number, targetBuckets: number): TimeGranularity {
+  const duration = Math.max(1, end - start);
+  if (Math.ceil(duration / 3_600_000) <= targetBuckets) return "hour";
+  if (Math.ceil(duration / 86_400_000) <= targetBuckets) return "day";
+  if (monthSpan(start, end) <= targetBuckets) return "month";
+  return "year";
+}
+
+function bucketStart(ts: number, granularity: TimeGranularity) {
+  const date = new Date(ts);
+  if (granularity === "year") return new Date(date.getFullYear(), 0, 1).getTime();
+  if (granularity === "month") return new Date(date.getFullYear(), date.getMonth(), 1).getTime();
+  if (granularity === "day") return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  if (granularity === "hour") return new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours()).getTime();
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours(), date.getMinutes()).getTime();
+}
+
+function monthSpan(start: number, end: number) {
+  const startDate = new Date(start);
+  const endDate = new Date(end);
+  return Math.max(1, (endDate.getFullYear() - startDate.getFullYear()) * 12 + endDate.getMonth() - startDate.getMonth() + 1);
+}
+
 function csvCell(value: unknown) {
   const text = String(value ?? "");
   return /[",\r\n]/.test(text) ? `"${text.replaceAll("\"", "\"\"")}"` : text;
@@ -389,7 +485,7 @@ function startResize(event: MouseEvent) {
 function resizeSidebar(event: MouseEvent) {
   sidebarWidth.value = clampSidebarWidth(event.clientX);
   persistSidebarWidth();
-  resizeCharts();
+  scheduleChartResize();
 }
 
 function stopResize() {
@@ -405,6 +501,6 @@ function resizeWithKeyboard(event: KeyboardEvent) {
   else if (event.key === "End") sidebarWidth.value = 360;
   else sidebarWidth.value = clampSidebarWidth(sidebarWidth.value + (event.key === "ArrowRight" ? 12 : -12));
   persistSidebarWidth();
-  resizeCharts();
+  scheduleChartResize();
 }
 </script>
