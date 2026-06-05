@@ -1,68 +1,95 @@
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import * as echarts from "echarts";
-import { Activity, Database, Download, FileText, FolderInput, Layers3, RefreshCw, TriangleAlert } from "@lucide/vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Activity, FileText, FolderInput, Layers3, MousePointer2, Orbit, RefreshCw } from "@lucide/vue";
+import AgentDashboard from "./components/AgentDashboard.vue";
 import { onHostMessage, postToHost } from "./host";
-import { costOption, distributionOption, trendOption } from "./charts";
+import { buildAgentStatusMessage } from "./payloadStatus";
 const navItems = [
     { id: "codex", label: "Codex", icon: Activity },
+    { id: "cursor", label: "Cursor", icon: MousePointer2 },
+    { id: "antigravity", label: "Antigravity", icon: Orbit },
     { id: "generic", label: "通用", icon: FileText },
     { id: "total", label: "总计", icon: Layers3 }
 ];
-const ranges = [
-    { id: "today", label: "今天" },
-    { id: "24h", label: "24 小时" },
-    { id: "7", label: "7 天" },
-    { id: "30", label: "30 天" },
-    { id: "history", label: "历史" }
-];
 const activePage = ref("codex");
-const activeRange = ref("today");
 const statusKind = ref("idle");
 const statusMessage = ref("等待宿主连接");
+const pageStatuses = ref({ codex: "idle", cursor: "idle", antigravity: "idle" });
+const pageMessages = ref({ codex: "等待数据", cursor: "等待数据", antigravity: "等待数据" });
 const codexRootDraft = ref("");
+const cursorCacheDraft = ref("");
+const antigravityCacheDraft = ref("");
+const cursorAuthAvailable = ref(false);
 const codexData = ref(null);
+const cursorData = ref(null);
+const antigravityData = ref(null);
+const codexRange = ref("today");
+const cursorRange = ref("today");
+const antigravityRange = ref("today");
 const sidebarWidth = ref(loadSidebarWidth());
 const workspace = ref(null);
-const trendChart = ref(null);
-const distributionChart = ref(null);
-const costChart = ref(null);
+const codexDashboard = ref(null);
+const cursorDashboard = ref(null);
+const antigravityDashboard = ref(null);
 const chartWidth = ref(0);
-let trendInstance = null;
-let distributionInstance = null;
-let costInstance = null;
 let resizeObserver = null;
 let resizeFrame = 0;
 const pageTitle = computed(() => {
     if (activePage.value === "codex")
         return "Codex 用量统计";
+    if (activePage.value === "cursor")
+        return "Cursor 用量统计";
+    if (activePage.value === "antigravity")
+        return "Antigravity 用量统计";
     if (activePage.value === "generic")
         return "通用文件分析";
     return "跨 Agent 总计";
 });
-const currentView = computed(() => codexData.value?.views?.[activeRange.value] ?? codexData.value?.views?.history ?? null);
-const chartView = computed(() => {
-    if (!currentView.value)
-        return null;
-    if (activeRange.value !== "history" || !codexData.value)
-        return currentView.value;
-    return {
-        ...currentView.value,
-        ...buildHistoryCharts(codexData.value.records, currentView.value.range.start, currentView.value.range.end, chartWidth.value)
-    };
-});
+function pageStatus(source) {
+    return pageStatuses.value[source];
+}
+function pageMessage(source) {
+    return pageMessages.value[source];
+}
 onMounted(() => {
     onHostMessage((message) => {
-        if (message.type === "settings" && typeof message.codexRoot === "string") {
-            codexRootDraft.value = message.codexRoot;
+        if (message.type === "settings") {
+            if (typeof message.codexRoot === "string")
+                codexRootDraft.value = message.codexRoot;
+            if (typeof message.cursorCachePath === "string")
+                cursorCacheDraft.value = message.cursorCachePath;
+            if (typeof message.antigravityCachePath === "string")
+                antigravityCacheDraft.value = message.antigravityCachePath;
+            if (typeof message.cursorAuthAvailable === "boolean")
+                cursorAuthAvailable.value = message.cursorAuthAvailable;
         }
         if (message.type === "status") {
-            statusKind.value = message.status ?? "idle";
-            statusMessage.value = typeof message.message === "string" ? message.message : "";
+            const source = typeof message.source === "string" ? message.source : null;
+            const status = message.status ?? "idle";
+            const text = typeof message.message === "string" ? message.message : "";
+            if (source && (source === "codex" || source === "cursor" || source === "antigravity")) {
+                pageStatuses.value[source] = status;
+                pageMessages.value[source] = text;
+            }
+            statusKind.value = status;
+            statusMessage.value = text;
         }
         if (message.type === "codexData") {
-            codexData.value = message.payload;
-            statusKind.value = "idle";
-            statusMessage.value = "已同步 Codex 用量";
+            const payload = message.payload;
+            codexData.value = payload;
+            pageStatuses.value.codex = "idle";
+            pageMessages.value.codex = buildAgentStatusMessage(payload);
+        }
+        if (message.type === "cursorData") {
+            const payload = message.payload;
+            cursorData.value = payload;
+            pageStatuses.value.cursor = "idle";
+            pageMessages.value.cursor = buildAgentStatusMessage(payload);
+        }
+        if (message.type === "antigravityData") {
+            const payload = message.payload;
+            antigravityData.value = payload;
+            pageStatuses.value.antigravity = "idle";
+            pageMessages.value.antigravity = buildAgentStatusMessage(payload);
         }
         if (message.type === "dashboardResize") {
             scheduleChartResize();
@@ -71,10 +98,8 @@ onMounted(() => {
     postToHost({ type: "ready" });
     window.addEventListener("resize", scheduleChartResize);
     resizeObserver = new ResizeObserver(scheduleChartResize);
-    [workspace.value, trendChart.value, distributionChart.value, costChart.value].forEach((element) => {
-        if (element)
-            resizeObserver?.observe(element);
-    });
+    if (workspace.value)
+        resizeObserver.observe(workspace.value);
     scheduleChartResize();
 });
 onBeforeUnmount(() => {
@@ -85,154 +110,37 @@ onBeforeUnmount(() => {
         cancelAnimationFrame(resizeFrame);
     stopResize();
 });
-watch(chartView, () => {
-    void renderCharts();
-});
 watch(activePage, () => {
-    void renderCharts();
-});
-async function renderCharts() {
-    await nextTick();
-    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-    if (!chartView.value || activePage.value !== "codex")
-        return;
-    if (trendChart.value) {
-        trendInstance = ensureChartInstance(trendChart.value, trendInstance);
-        trendInstance.setOption(trendOption(chartView.value), true);
-    }
-    if (distributionChart.value) {
-        distributionInstance = ensureChartInstance(distributionChart.value, distributionInstance);
-        distributionInstance.setOption(distributionOption(chartView.value), true);
-    }
-    if (costChart.value) {
-        costInstance = ensureChartInstance(costChart.value, costInstance);
-        costInstance.setOption(costOption(chartView.value), true);
-    }
     scheduleChartResize();
-}
-function ensureChartInstance(element, instance) {
-    if (instance && instance.getDom() === element)
-        return instance;
-    instance?.dispose();
-    return echarts.init(element);
-}
-function resizeCharts() {
-    chartWidth.value = Math.max(trendChart.value?.clientWidth ?? 0, distributionChart.value?.clientWidth ?? 0);
-    trendInstance?.resize();
-    distributionInstance?.resize();
-    costInstance?.resize();
-}
+});
 function scheduleChartResize() {
     if (resizeFrame)
         cancelAnimationFrame(resizeFrame);
     resizeFrame = requestAnimationFrame(() => {
         resizeFrame = 0;
-        resizeCharts();
+        chartWidth.value = workspace.value?.clientWidth ?? 0;
+        codexDashboard.value?.scheduleChartResize();
+        cursorDashboard.value?.scheduleChartResize();
+        antigravityDashboard.value?.scheduleChartResize();
     });
 }
-function refresh() {
+function refreshCodex() {
     postToHost({ type: "refresh" });
+}
+function refreshCursor() {
+    postToHost({ type: "refreshCursor" });
+}
+function refreshAntigravity() {
+    postToHost({ type: "refreshAntigravity" });
 }
 function saveCodexRoot() {
     postToHost({ type: "setCodexRoot", path: codexRootDraft.value });
 }
-function exportCsv() {
-    if (!codexData.value || !currentView.value)
-        return;
-    const rows = codexData.value.records.filter((row) => row[0] >= currentView.value.range.start && row[0] <= currentView.value.range.end);
-    const headers = ["Date", "Cloud Agent ID", "Automation ID", "Kind", "Model", "Max Mode", "Input (w/ Cache Write)", "Input (w/o Cache Write)", "Cache Read", "Output Tokens", "Total Tokens", "Cost"];
-    const body = rows.map((row) => {
-        const input = row[3] || 0;
-        const cached = Math.min(input, row[4] || 0);
-        const inputWithoutCache = Math.max(0, input - cached);
-        const output = (row[5] || 0) + (row[6] || 0);
-        const cost = priceRecord(row).toFixed(2);
-        return [new Date(row[0]).toISOString(), "", "", "", row[2], "", input, inputWithoutCache, cached, output, row[7], cost].map(csvCell).join(",");
-    });
-    const blob = new Blob([[headers.join(","), ...body].join("\r\n")], { type: "text/csv;charset=utf-8" });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = `usage-events-${currentView.value.key}.csv`;
-    link.click();
-    URL.revokeObjectURL(link.href);
+function saveCursorCachePath() {
+    postToHost({ type: "setCursorCachePath", path: cursorCacheDraft.value });
 }
-function priceRecord(row) {
-    const rules = codexData.value?.pricingRules ?? [];
-    const model = row[2].toLowerCase();
-    const rule = rules.find((item) => item.patterns.some((pattern) => model.includes(pattern)));
-    if (!rule)
-        return 0;
-    const cached = Math.min(row[3] || 0, row[4] || 0);
-    const input = Math.max(0, (row[3] || 0) - cached);
-    const output = row[5] || 0;
-    const reasoning = row[6] || 0;
-    return (input * rule.input + cached * rule.cached + (output + reasoning) * rule.output) / 1_000_000;
-}
-function buildHistoryCharts(records, start, end, width) {
-    const rows = records.filter((row) => row[0] >= start && row[0] <= end);
-    const granularity = chooseHistoryGranularity(start, end, targetBucketCount(width));
-    const bucketMap = new Map();
-    for (const row of rows) {
-        const ts = bucketStart(row[0], granularity);
-        const bucket = bucketMap.get(ts) ??
-            {
-                trend: [ts, 0, 0, 0, 0, 0, 0, 0],
-                distribution: [ts, 0, 0, 0]
-            };
-        const cost = priceRecord(row);
-        bucket.trend[1] += row[7] || 0;
-        bucket.trend[2] += row[4] || 0;
-        bucket.trend[3] += row[5] || 0;
-        bucket.trend[4] += row[3] || 0;
-        bucket.trend[5] += row[6] || 0;
-        bucket.trend[6] += 1;
-        bucket.trend[7] += cost;
-        bucket.distribution[1] += row[7] || 0;
-        bucket.distribution[2] += 1;
-        bucket.distribution[3] += cost;
-        bucketMap.set(ts, bucket);
-    }
-    const buckets = Array.from(bucketMap.values()).sort((a, b) => a.trend[0] - b.trend[0]);
-    return {
-        axisGranularity: granularity,
-        trend: buckets.map((bucket) => [bucket.trend[0], bucket.trend[1], bucket.trend[2], bucket.trend[3], bucket.trend[4], bucket.trend[5], bucket.trend[6], Number(bucket.trend[7].toFixed(6))]),
-        distribution: buckets.map((bucket) => [bucket.distribution[0], bucket.distribution[1], bucket.distribution[2], Number(bucket.distribution[3].toFixed(6))])
-    };
-}
-function targetBucketCount(width) {
-    const safeWidth = width > 0 ? width : 900;
-    return Math.max(36, Math.min(180, Math.round(safeWidth / 10)));
-}
-function chooseHistoryGranularity(start, end, targetBuckets) {
-    const duration = Math.max(1, end - start);
-    if (Math.ceil(duration / 3_600_000) <= targetBuckets)
-        return "hour";
-    if (Math.ceil(duration / 86_400_000) <= targetBuckets)
-        return "day";
-    if (monthSpan(start, end) <= targetBuckets)
-        return "month";
-    return "year";
-}
-function bucketStart(ts, granularity) {
-    const date = new Date(ts);
-    if (granularity === "year")
-        return new Date(date.getFullYear(), 0, 1).getTime();
-    if (granularity === "month")
-        return new Date(date.getFullYear(), date.getMonth(), 1).getTime();
-    if (granularity === "day")
-        return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-    if (granularity === "hour")
-        return new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours()).getTime();
-    return new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours(), date.getMinutes()).getTime();
-}
-function monthSpan(start, end) {
-    const startDate = new Date(start);
-    const endDate = new Date(end);
-    return Math.max(1, (endDate.getFullYear() - startDate.getFullYear()) * 12 + endDate.getMonth() - startDate.getMonth() + 1);
-}
-function csvCell(value) {
-    const text = String(value ?? "");
-    return /[",\r\n]/.test(text) ? `"${text.replaceAll("\"", "\"\"")}"` : text;
+function saveAntigravityCachePath() {
+    postToHost({ type: "setAntigravityCachePath", path: antigravityCacheDraft.value });
 }
 function loadSidebarWidth() {
     const raw = Number(localStorage.getItem("agentstatistics.sidebarWidth"));
@@ -384,298 +292,250 @@ if (__VLS_ctx.activePage === 'codex') {
         size: (17),
     }, ...__VLS_functionalComponentArgsRest(__VLS_5));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-        ...{ onClick: (__VLS_ctx.refresh) },
+        ...{ onClick: (__VLS_ctx.refreshCodex) },
         ...{ class: "primary-button" },
-        disabled: (__VLS_ctx.statusKind === 'scanning'),
+        disabled: (__VLS_ctx.pageStatus('codex') === 'scanning'),
     });
     const __VLS_8 = {}.RefreshCw;
     /** @type {[typeof __VLS_components.RefreshCw, ]} */ ;
     // @ts-ignore
     const __VLS_9 = __VLS_asFunctionalComponent(__VLS_8, new __VLS_8({
         size: (17),
-        ...{ class: ({ spinning: __VLS_ctx.statusKind === 'scanning' }) },
+        ...{ class: ({ spinning: __VLS_ctx.pageStatus('codex') === 'scanning' }) },
     }));
     const __VLS_10 = __VLS_9({
         size: (17),
-        ...{ class: ({ spinning: __VLS_ctx.statusKind === 'scanning' }) },
+        ...{ class: ({ spinning: __VLS_ctx.pageStatus('codex') === 'scanning' }) },
     }, ...__VLS_functionalComponentArgsRest(__VLS_9));
 }
-if (__VLS_ctx.activePage === 'codex') {
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-        ...{ class: "page" },
-    });
+else if (__VLS_ctx.activePage === 'cursor') {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "range-row" },
+        ...{ class: "topbar-actions" },
     });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "range-tabs" },
-        role: "tablist",
-        'aria-label': "统计范围",
-    });
-    for (const [range] of __VLS_getVForSourceType((__VLS_ctx.ranges))) {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-            ...{ onClick: (...[$event]) => {
-                    if (!(__VLS_ctx.activePage === 'codex'))
-                        return;
-                    __VLS_ctx.activeRange = range.id;
-                } },
-            key: (range.id),
-            ...{ class: ({ active: __VLS_ctx.activeRange === range.id }) },
-        });
-        (range.label);
-    }
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "sync-meta" },
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "path-field" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-    (__VLS_ctx.codexData ? `${__VLS_ctx.codexData.generatedAt} 已同步` : "等待数据");
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-        ...{ onClick: (__VLS_ctx.exportCsv) },
-        ...{ class: "text-button" },
-        disabled: (!__VLS_ctx.currentView),
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        ...{ onKeyup: (__VLS_ctx.saveCursorCachePath) },
+        value: (__VLS_ctx.cursorCacheDraft),
+        type: "text",
+        spellcheck: "false",
+        title: "cursor-cache 目录完整路径",
     });
-    const __VLS_12 = {}.Download;
-    /** @type {[typeof __VLS_components.Download, ]} */ ;
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "auth-hint" },
+        ...{ class: ({ ready: __VLS_ctx.cursorAuthAvailable }) },
+    });
+    (__VLS_ctx.cursorAuthAvailable ? "将自动读取 tokscale 凭证或本机 Cursor 登录缓存（无需保持应用打开）" : "未检测到 Cursor 登录态，请配置 tokscale 凭证或在本机 Cursor 完成一次登录");
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveCursorCachePath) },
+        ...{ class: "secondary-button" },
+    });
+    const __VLS_12 = {}.FolderInput;
+    /** @type {[typeof __VLS_components.FolderInput, ]} */ ;
     // @ts-ignore
     const __VLS_13 = __VLS_asFunctionalComponent(__VLS_12, new __VLS_12({
-        size: (16),
+        size: (17),
     }));
     const __VLS_14 = __VLS_13({
-        size: (16),
+        size: (17),
     }, ...__VLS_functionalComponentArgsRest(__VLS_13));
-    if (!__VLS_ctx.codexData && __VLS_ctx.statusKind !== 'error') {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "empty-panel" },
-        });
-        const __VLS_16 = {}.Database;
-        /** @type {[typeof __VLS_components.Database, ]} */ ;
-        // @ts-ignore
-        const __VLS_17 = __VLS_asFunctionalComponent(__VLS_16, new __VLS_16({
-            size: (34),
-        }));
-        const __VLS_18 = __VLS_17({
-            size: (34),
-        }, ...__VLS_functionalComponentArgsRest(__VLS_17));
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    }
-    else if (__VLS_ctx.statusKind === 'error') {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "empty-panel error" },
-        });
-        const __VLS_20 = {}.TriangleAlert;
-        /** @type {[typeof __VLS_components.TriangleAlert, ]} */ ;
-        // @ts-ignore
-        const __VLS_21 = __VLS_asFunctionalComponent(__VLS_20, new __VLS_20({
-            size: (34),
-        }));
-        const __VLS_22 = __VLS_21({
-            size: (34),
-        }, ...__VLS_functionalComponentArgsRest(__VLS_21));
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-        (__VLS_ctx.statusMessage);
-    }
-    else if (__VLS_ctx.currentView) {
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            ...{ class: "kpi-grid" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "kpi-card primary" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-        (__VLS_ctx.currentView.summary.totalTokensLabel);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        (__VLS_ctx.currentView.summary.requestsLabel);
-        (__VLS_ctx.currentView.summary.peakTpmLabel);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "kpi-card" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-        (__VLS_ctx.currentView.summary.inputLabel);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        (__VLS_ctx.currentView.summary.cachedLabel);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "kpi-card" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-        (__VLS_ctx.currentView.summary.outputLabel);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        (__VLS_ctx.currentView.summary.reasoningLabel);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "kpi-card" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-        (__VLS_ctx.currentView.summary.cacheHitLabel);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        (__VLS_ctx.currentView.summary.failures);
-        (__VLS_ctx.currentView.summary.successRateLabel);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "kpi-card accent" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-        (__VLS_ctx.currentView.cost.total.toFixed(2));
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
-        (__VLS_ctx.currentView.cost.average.toFixed(2));
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            ...{ class: "dashboard-grid" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "panel wide" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "panel-head" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-        (__VLS_ctx.currentView.label);
-        (__VLS_ctx.currentView.summary.totalTokensLabel);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ref: "trendChart",
-            ...{ class: "chart" },
-        });
-        /** @type {typeof __VLS_ctx.trendChart} */ ;
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "panel" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "panel-head" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "risk-list" },
-        });
-        for (const [risk] of __VLS_getVForSourceType((__VLS_ctx.currentView.risk))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                key: (risk.name),
-                ...{ class: "risk-row" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-            (risk.name);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (risk.note);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-            (risk.percentLabel || risk.label);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                ...{ class: "risk-bar" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ style: ({ width: `${Math.min(100, Math.max(0, risk.value || 0))}%` }) },
-            });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.refreshCursor) },
+        ...{ class: "primary-button" },
+        disabled: (__VLS_ctx.pageStatus('cursor') === 'scanning'),
+    });
+    const __VLS_16 = {}.RefreshCw;
+    /** @type {[typeof __VLS_components.RefreshCw, ]} */ ;
+    // @ts-ignore
+    const __VLS_17 = __VLS_asFunctionalComponent(__VLS_16, new __VLS_16({
+        size: (17),
+        ...{ class: ({ spinning: __VLS_ctx.pageStatus('cursor') === 'scanning' }) },
+    }));
+    const __VLS_18 = __VLS_17({
+        size: (17),
+        ...{ class: ({ spinning: __VLS_ctx.pageStatus('cursor') === 'scanning' }) },
+    }, ...__VLS_functionalComponentArgsRest(__VLS_17));
+}
+else if (__VLS_ctx.activePage === 'antigravity') {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "topbar-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.label, __VLS_intrinsicElements.label)({
+        ...{ class: "path-field" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.input)({
+        ...{ onKeyup: (__VLS_ctx.saveAntigravityCachePath) },
+        value: (__VLS_ctx.antigravityCacheDraft),
+        type: "text",
+        spellcheck: "false",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.saveAntigravityCachePath) },
+        ...{ class: "secondary-button" },
+    });
+    const __VLS_20 = {}.FolderInput;
+    /** @type {[typeof __VLS_components.FolderInput, ]} */ ;
+    // @ts-ignore
+    const __VLS_21 = __VLS_asFunctionalComponent(__VLS_20, new __VLS_20({
+        size: (17),
+    }));
+    const __VLS_22 = __VLS_21({
+        size: (17),
+    }, ...__VLS_functionalComponentArgsRest(__VLS_21));
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.refreshAntigravity) },
+        ...{ class: "primary-button" },
+        disabled: (__VLS_ctx.pageStatus('antigravity') === 'scanning'),
+    });
+    const __VLS_24 = {}.RefreshCw;
+    /** @type {[typeof __VLS_components.RefreshCw, ]} */ ;
+    // @ts-ignore
+    const __VLS_25 = __VLS_asFunctionalComponent(__VLS_24, new __VLS_24({
+        size: (17),
+        ...{ class: ({ spinning: __VLS_ctx.pageStatus('antigravity') === 'scanning' }) },
+    }));
+    const __VLS_26 = __VLS_25({
+        size: (17),
+        ...{ class: ({ spinning: __VLS_ctx.pageStatus('antigravity') === 'scanning' }) },
+    }, ...__VLS_functionalComponentArgsRest(__VLS_25));
+}
+if (__VLS_ctx.activePage === 'codex') {
+    /** @type {[typeof AgentDashboard, ]} */ ;
+    // @ts-ignore
+    const __VLS_28 = __VLS_asFunctionalComponent(AgentDashboard, new AgentDashboard({
+        ...{ 'onUpdate:activeRange': {} },
+        ref: "codexDashboard",
+        payload: (__VLS_ctx.codexData),
+        activeRange: (__VLS_ctx.codexRange),
+        statusKind: (__VLS_ctx.pageStatus('codex')),
+        statusMessage: (__VLS_ctx.pageMessage('codex')),
+        chartWidth: (__VLS_ctx.chartWidth),
+        active: (__VLS_ctx.activePage === 'codex'),
+        emptyTitle: "等待 Codex 用量数据",
+        emptyDescription: "应用会监听本地 Codex 会话日志。也可以点击刷新立即扫描。",
+        riskCaption: "来自 Codex rate_limits",
+    }));
+    const __VLS_29 = __VLS_28({
+        ...{ 'onUpdate:activeRange': {} },
+        ref: "codexDashboard",
+        payload: (__VLS_ctx.codexData),
+        activeRange: (__VLS_ctx.codexRange),
+        statusKind: (__VLS_ctx.pageStatus('codex')),
+        statusMessage: (__VLS_ctx.pageMessage('codex')),
+        chartWidth: (__VLS_ctx.chartWidth),
+        active: (__VLS_ctx.activePage === 'codex'),
+        emptyTitle: "等待 Codex 用量数据",
+        emptyDescription: "应用会监听本地 Codex 会话日志。也可以点击刷新立即扫描。",
+        riskCaption: "来自 Codex rate_limits",
+    }, ...__VLS_functionalComponentArgsRest(__VLS_28));
+    let __VLS_31;
+    let __VLS_32;
+    let __VLS_33;
+    const __VLS_34 = {
+        'onUpdate:activeRange': (...[$event]) => {
+            if (!(__VLS_ctx.activePage === 'codex'))
+                return;
+            __VLS_ctx.codexRange = $event;
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "panel wide" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "panel-head" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ref: "distributionChart",
-            ...{ class: "chart" },
-        });
-        /** @type {typeof __VLS_ctx.distributionChart} */ ;
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "panel" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "panel-head" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ref: "costChart",
-            ...{ class: "chart small" },
-        });
-        /** @type {typeof __VLS_ctx.costChart} */ ;
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-            ...{ class: "tables-grid" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "panel table-panel" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "panel-head" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "data-table" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "table-head session" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        for (const [row] of __VLS_getVForSourceType((__VLS_ctx.currentView.sessions))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                key: (`${row.rank}-${row.name}`),
-                ...{ class: "table-row session" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-            (row.rank);
-            (row.name);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "pill" },
-            });
-            (row.model);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (row.tokensLabel);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (row.requests);
+    };
+    /** @type {typeof __VLS_ctx.codexDashboard} */ ;
+    var __VLS_35 = {};
+    var __VLS_30;
+}
+else if (__VLS_ctx.activePage === 'cursor') {
+    /** @type {[typeof AgentDashboard, ]} */ ;
+    // @ts-ignore
+    const __VLS_37 = __VLS_asFunctionalComponent(AgentDashboard, new AgentDashboard({
+        ...{ 'onUpdate:activeRange': {} },
+        ref: "cursorDashboard",
+        payload: (__VLS_ctx.cursorData),
+        activeRange: (__VLS_ctx.cursorRange),
+        statusKind: (__VLS_ctx.pageStatus('cursor')),
+        statusMessage: (__VLS_ctx.pageMessage('cursor')),
+        chartWidth: (__VLS_ctx.chartWidth),
+        active: (__VLS_ctx.activePage === 'cursor'),
+        emptyTitle: "等待 Cursor 用量数据",
+        emptyDescription: "应用会读取 tokscale / token-monitor 凭证或本机 Cursor 登录缓存并同步云端用量，无需保持 Cursor 应用打开。",
+        riskCaption: "来自 Cursor usage-summary API",
+    }));
+    const __VLS_38 = __VLS_37({
+        ...{ 'onUpdate:activeRange': {} },
+        ref: "cursorDashboard",
+        payload: (__VLS_ctx.cursorData),
+        activeRange: (__VLS_ctx.cursorRange),
+        statusKind: (__VLS_ctx.pageStatus('cursor')),
+        statusMessage: (__VLS_ctx.pageMessage('cursor')),
+        chartWidth: (__VLS_ctx.chartWidth),
+        active: (__VLS_ctx.activePage === 'cursor'),
+        emptyTitle: "等待 Cursor 用量数据",
+        emptyDescription: "应用会读取 tokscale / token-monitor 凭证或本机 Cursor 登录缓存并同步云端用量，无需保持 Cursor 应用打开。",
+        riskCaption: "来自 Cursor usage-summary API",
+    }, ...__VLS_functionalComponentArgsRest(__VLS_37));
+    let __VLS_40;
+    let __VLS_41;
+    let __VLS_42;
+    const __VLS_43 = {
+        'onUpdate:activeRange': (...[$event]) => {
+            if (!!(__VLS_ctx.activePage === 'codex'))
+                return;
+            if (!(__VLS_ctx.activePage === 'cursor'))
+                return;
+            __VLS_ctx.cursorRange = $event;
         }
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-            ...{ class: "panel table-panel" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "panel-head" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "data-table" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "table-head model" },
-        });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        for (const [row] of __VLS_getVForSourceType((__VLS_ctx.currentView.models))) {
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-                key: (row.name),
-                ...{ class: "table-row model" },
-            });
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-                ...{ class: "model-name" },
-            });
-            (row.name);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (row.tokensLabel);
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (row.cost.toFixed(2));
-            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-            (row.latencyLabel);
+    };
+    /** @type {typeof __VLS_ctx.cursorDashboard} */ ;
+    var __VLS_44 = {};
+    var __VLS_39;
+}
+else if (__VLS_ctx.activePage === 'antigravity') {
+    /** @type {[typeof AgentDashboard, ]} */ ;
+    // @ts-ignore
+    const __VLS_46 = __VLS_asFunctionalComponent(AgentDashboard, new AgentDashboard({
+        ...{ 'onUpdate:activeRange': {} },
+        ref: "antigravityDashboard",
+        payload: (__VLS_ctx.antigravityData),
+        activeRange: (__VLS_ctx.antigravityRange),
+        statusKind: (__VLS_ctx.pageStatus('antigravity')),
+        statusMessage: (__VLS_ctx.pageMessage('antigravity')),
+        chartWidth: (__VLS_ctx.chartWidth),
+        active: (__VLS_ctx.activePage === 'antigravity'),
+        emptyTitle: "等待 Antigravity 用量数据",
+        emptyDescription: "刷新时会从运行中的 Antigravity CLI（agy）同步用量，并读取 ~/.gemini/antigravity-cli 的 transcript 与 antigravity-cache；CLI 未运行时仍可读取已有本地数据。",
+        riskCaption: "来自 Antigravity Connect RPC",
+    }));
+    const __VLS_47 = __VLS_46({
+        ...{ 'onUpdate:activeRange': {} },
+        ref: "antigravityDashboard",
+        payload: (__VLS_ctx.antigravityData),
+        activeRange: (__VLS_ctx.antigravityRange),
+        statusKind: (__VLS_ctx.pageStatus('antigravity')),
+        statusMessage: (__VLS_ctx.pageMessage('antigravity')),
+        chartWidth: (__VLS_ctx.chartWidth),
+        active: (__VLS_ctx.activePage === 'antigravity'),
+        emptyTitle: "等待 Antigravity 用量数据",
+        emptyDescription: "刷新时会从运行中的 Antigravity CLI（agy）同步用量，并读取 ~/.gemini/antigravity-cli 的 transcript 与 antigravity-cache；CLI 未运行时仍可读取已有本地数据。",
+        riskCaption: "来自 Antigravity Connect RPC",
+    }, ...__VLS_functionalComponentArgsRest(__VLS_46));
+    let __VLS_49;
+    let __VLS_50;
+    let __VLS_51;
+    const __VLS_52 = {
+        'onUpdate:activeRange': (...[$event]) => {
+            if (!!(__VLS_ctx.activePage === 'codex'))
+                return;
+            if (!!(__VLS_ctx.activePage === 'cursor'))
+                return;
+            if (!(__VLS_ctx.activePage === 'antigravity'))
+                return;
+            __VLS_ctx.antigravityRange = $event;
         }
-    }
+    };
+    /** @type {typeof __VLS_ctx.antigravityDashboard} */ ;
+    var __VLS_53 = {};
+    var __VLS_48;
 }
 else if (__VLS_ctx.activePage === 'generic') {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
@@ -684,15 +544,15 @@ else if (__VLS_ctx.activePage === 'generic') {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "empty-panel" },
     });
-    const __VLS_24 = {}.FileText;
+    const __VLS_55 = {}.FileText;
     /** @type {[typeof __VLS_components.FileText, ]} */ ;
     // @ts-ignore
-    const __VLS_25 = __VLS_asFunctionalComponent(__VLS_24, new __VLS_24({
+    const __VLS_56 = __VLS_asFunctionalComponent(__VLS_55, new __VLS_55({
         size: (36),
     }));
-    const __VLS_26 = __VLS_25({
+    const __VLS_57 = __VLS_56({
         size: (36),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_25));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_56));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
 }
@@ -703,15 +563,15 @@ else {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "empty-panel" },
     });
-    const __VLS_28 = {}.Layers3;
+    const __VLS_59 = {}.Layers3;
     /** @type {[typeof __VLS_components.Layers3, ]} */ ;
     // @ts-ignore
-    const __VLS_29 = __VLS_asFunctionalComponent(__VLS_28, new __VLS_28({
+    const __VLS_60 = __VLS_asFunctionalComponent(__VLS_59, new __VLS_59({
         size: (36),
     }));
-    const __VLS_30 = __VLS_29({
+    const __VLS_61 = __VLS_60({
         size: (36),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_29));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_60));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
 }
@@ -731,92 +591,59 @@ else {
 /** @type {__VLS_StyleScopedClasses['path-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
-/** @type {__VLS_StyleScopedClasses['page']} */ ;
-/** @type {__VLS_StyleScopedClasses['range-row']} */ ;
-/** @type {__VLS_StyleScopedClasses['range-tabs']} */ ;
-/** @type {__VLS_StyleScopedClasses['sync-meta']} */ ;
-/** @type {__VLS_StyleScopedClasses['text-button']} */ ;
-/** @type {__VLS_StyleScopedClasses['empty-panel']} */ ;
-/** @type {__VLS_StyleScopedClasses['empty-panel']} */ ;
-/** @type {__VLS_StyleScopedClasses['error']} */ ;
-/** @type {__VLS_StyleScopedClasses['kpi-grid']} */ ;
-/** @type {__VLS_StyleScopedClasses['kpi-card']} */ ;
-/** @type {__VLS_StyleScopedClasses['primary']} */ ;
-/** @type {__VLS_StyleScopedClasses['kpi-card']} */ ;
-/** @type {__VLS_StyleScopedClasses['kpi-card']} */ ;
-/** @type {__VLS_StyleScopedClasses['kpi-card']} */ ;
-/** @type {__VLS_StyleScopedClasses['kpi-card']} */ ;
-/** @type {__VLS_StyleScopedClasses['accent']} */ ;
-/** @type {__VLS_StyleScopedClasses['dashboard-grid']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel']} */ ;
-/** @type {__VLS_StyleScopedClasses['wide']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel-head']} */ ;
-/** @type {__VLS_StyleScopedClasses['chart']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel-head']} */ ;
-/** @type {__VLS_StyleScopedClasses['risk-list']} */ ;
-/** @type {__VLS_StyleScopedClasses['risk-row']} */ ;
-/** @type {__VLS_StyleScopedClasses['risk-bar']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel']} */ ;
-/** @type {__VLS_StyleScopedClasses['wide']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel-head']} */ ;
-/** @type {__VLS_StyleScopedClasses['chart']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel-head']} */ ;
-/** @type {__VLS_StyleScopedClasses['chart']} */ ;
-/** @type {__VLS_StyleScopedClasses['small']} */ ;
-/** @type {__VLS_StyleScopedClasses['tables-grid']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel']} */ ;
-/** @type {__VLS_StyleScopedClasses['table-panel']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel-head']} */ ;
-/** @type {__VLS_StyleScopedClasses['data-table']} */ ;
-/** @type {__VLS_StyleScopedClasses['table-head']} */ ;
-/** @type {__VLS_StyleScopedClasses['session']} */ ;
-/** @type {__VLS_StyleScopedClasses['table-row']} */ ;
-/** @type {__VLS_StyleScopedClasses['session']} */ ;
-/** @type {__VLS_StyleScopedClasses['pill']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel']} */ ;
-/** @type {__VLS_StyleScopedClasses['table-panel']} */ ;
-/** @type {__VLS_StyleScopedClasses['panel-head']} */ ;
-/** @type {__VLS_StyleScopedClasses['data-table']} */ ;
-/** @type {__VLS_StyleScopedClasses['table-head']} */ ;
-/** @type {__VLS_StyleScopedClasses['model']} */ ;
-/** @type {__VLS_StyleScopedClasses['table-row']} */ ;
-/** @type {__VLS_StyleScopedClasses['model']} */ ;
-/** @type {__VLS_StyleScopedClasses['model-name']} */ ;
+/** @type {__VLS_StyleScopedClasses['topbar-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['path-field']} */ ;
+/** @type {__VLS_StyleScopedClasses['auth-hint']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['topbar-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['path-field']} */ ;
+/** @type {__VLS_StyleScopedClasses['secondary-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-panel']} */ ;
+// @ts-ignore
+var __VLS_36 = __VLS_35, __VLS_45 = __VLS_44, __VLS_54 = __VLS_53;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
     setup() {
         return {
-            Database: Database,
-            Download: Download,
             FileText: FileText,
             FolderInput: FolderInput,
             Layers3: Layers3,
             RefreshCw: RefreshCw,
-            TriangleAlert: TriangleAlert,
+            AgentDashboard: AgentDashboard,
             navItems: navItems,
-            ranges: ranges,
             activePage: activePage,
-            activeRange: activeRange,
             statusKind: statusKind,
             statusMessage: statusMessage,
             codexRootDraft: codexRootDraft,
+            cursorCacheDraft: cursorCacheDraft,
+            antigravityCacheDraft: antigravityCacheDraft,
+            cursorAuthAvailable: cursorAuthAvailable,
             codexData: codexData,
+            cursorData: cursorData,
+            antigravityData: antigravityData,
+            codexRange: codexRange,
+            cursorRange: cursorRange,
+            antigravityRange: antigravityRange,
             sidebarWidth: sidebarWidth,
             workspace: workspace,
-            trendChart: trendChart,
-            distributionChart: distributionChart,
-            costChart: costChart,
+            codexDashboard: codexDashboard,
+            cursorDashboard: cursorDashboard,
+            antigravityDashboard: antigravityDashboard,
+            chartWidth: chartWidth,
             pageTitle: pageTitle,
-            currentView: currentView,
-            refresh: refresh,
+            pageStatus: pageStatus,
+            pageMessage: pageMessage,
+            refreshCodex: refreshCodex,
+            refreshCursor: refreshCursor,
+            refreshAntigravity: refreshAntigravity,
             saveCodexRoot: saveCodexRoot,
-            exportCsv: exportCsv,
+            saveCursorCachePath: saveCursorCachePath,
+            saveAntigravityCachePath: saveAntigravityCachePath,
             startResize: startResize,
             resizeWithKeyboard: resizeWithKeyboard,
         };

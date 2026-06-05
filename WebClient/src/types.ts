@@ -64,7 +64,18 @@ export interface RiskRow {
   tone: string;
 }
 
-export interface CodexView {
+export type AgentSource = "codex" | "cursor" | "antigravity";
+
+export type AgentDataStatus = "ok" | "empty" | "sync_failed" | "parse_empty";
+
+export interface AgentSyncResult {
+  synced?: boolean;
+  rows?: number;
+  error?: string;
+  path?: string;
+}
+
+export interface AgentView {
   key: string;
   label: string;
   range: { start: number; end: number };
@@ -79,23 +90,38 @@ export interface CodexView {
   risk: RiskRow[];
 }
 
-export interface CodexPayload {
+export interface AgentPayload {
   schemaVersion: number;
-  source: "codex";
+  source: AgentSource;
   generatedAt: string;
   root: string;
+  dataStatus?: AgentDataStatus;
+  sync?: AgentSyncResult;
   pricingRules: Array<{ label: string; patterns: string[]; input: number; cached: number; output: number }>;
   records: Array<[number, string, string, number, number, number, number, number]>;
   ttfbRecords: Array<[number, string, string, number]>;
   failureRecords: Array<[number, string, string]>;
-  views: Record<string, CodexView>;
+  views: Record<string, AgentView>;
   summary: UsageSummary;
   cost: CostSummary;
   sessions: RankingRow[];
   models: ModelRow[];
   risk: RiskRow[];
   coverage: Array<{ metric: string; source: string; status: string }>;
+  limits?: {
+    sync?: AgentSyncResult;
+    raw?: Record<string, unknown>;
+    planType?: string;
+  };
+  auth?: {
+    source?: string;
+    email?: string;
+    path?: string;
+  };
 }
+
+export type CodexView = AgentView;
+export type CodexPayload = AgentPayload & { source: "codex" };
 
 export interface HostMessage {
   type: string;

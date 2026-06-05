@@ -1,6 +1,6 @@
 # AgentStatistics
 
-AgentStatistics 是一个面向 Windows 桌面的本地 AI Agent 用量统计工具。它通过 WPF 承载 WebView2 仪表盘，读取本机 Codex 会话日志，展示 Token 消耗、模型分布、调用趋势、缓存命中、失败状态、额度风险和费用估算等用量元数据。
+AgentStatistics 是一个面向 Windows 桌面的本地 AI Agent 用量统计工具。它通过 WPF 承载 WebView2 仪表盘，读取本机 Codex、Cursor、Antigravity 用量数据，展示 Token 消耗、模型分布、调用趋势、缓存命中、失败状态、额度风险和费用估算等用量元数据。
 
 项目强调本地优先：统计过程只处理 Codex 会话日志中的用量元数据，不读取、不导出、不上传用户提示词、助手正文、工具输出或代码片段。
 
@@ -9,6 +9,8 @@ AgentStatistics 是一个面向 Windows 桌面的本地 AI Agent 用量统计工
 | 能力 | 说明 |
 | --- | --- |
 | Codex 用量监测 | 扫描本机 Codex sessions JSONL 日志，聚合请求数、模型、Token 类型与时间范围视图。 |
+| Cursor 用量监测 | 解析 tokscale `cursor-cache` CSV，可选 Session Token 云端同步与 usage-summary 额度探测。 |
+| Antigravity 用量监测 | 读取 `antigravity-cache/sessions/*.jsonl` 与 `~/.gemini/antigravity-cli` transcript；刷新时从运行中 CLI（agy）经 Connect RPC 同步；可选配额风险面板。 |
 | 趋势可视化 | 使用 Vue、Vite 和 ECharts 展示 Token 趋势、调用分布、费用结构和风险状态。 |
 | 本地路径配置 | 支持在界面中配置 Codex sessions 路径，并通过 WPF 监听日志变化触发刷新。 |
 | 桌面集成 | 使用 WPF + WebView2 提供桌面应用壳，支持窗口布局与会话状态持久化。 |

@@ -25,6 +25,14 @@ public static partial class CompositionRoot
     public static CodexUsageService CodexUsageService =>
         Services.GetRequiredService<CodexUsageService>();
 
+    /// <summary>Cursor 用量统计服务。</summary>
+    public static CursorUsageService CursorUsageService =>
+        Services.GetRequiredService<CursorUsageService>();
+
+    /// <summary>Antigravity 用量统计服务。</summary>
+    public static AntigravityUsageService AntigravityUsageService =>
+        Services.GetRequiredService<AntigravityUsageService>();
+
     private static IServiceProvider Build()
     {
         var c = new ServiceCollection();
@@ -32,6 +40,8 @@ public static partial class CompositionRoot
         c.AddSingleton<PythonBridge>();
         c.AddSingleton<SampleCalculationService>();
         c.AddSingleton<CodexUsageService>();
+        c.AddSingleton<CursorUsageService>();
+        c.AddSingleton<AntigravityUsageService>();
         return c.BuildServiceProvider();
     }
 }

@@ -122,6 +122,136 @@ public static class UserSettingsStore
         Save(dict);
     }
 
+    /// <summary>
+    /// 读取 Cursor tokscale 缓存目录。
+    /// </summary>
+    /// <returns>cursor-cache 目录路径。</returns>
+    public static string LoadCursorCachePath()
+    {
+        var settings = Load();
+        if (settings.TryGetValue("cursorCachePath", out var value) &&
+            value.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace(value.GetString()))
+        {
+            return value.GetString()!;
+        }
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".config",
+            "tokscale",
+            "cursor-cache");
+    }
+
+    /// <summary>
+    /// 保存 Cursor tokscale 缓存目录。
+    /// </summary>
+    /// <param name="path">cursor-cache 目录路径。</param>
+    public static void SaveCursorCachePath(string path)
+    {
+        var dict = ToMutableDictionary(Load());
+        dict["cursorCachePath"] = path;
+        Save(dict);
+    }
+
+    /// <summary>
+    /// 读取 Antigravity tokscale 缓存目录。
+    /// </summary>
+    /// <returns>antigravity-cache 目录路径。</returns>
+    public static string LoadAntigravityCachePath()
+    {
+        var settings = Load();
+        if (settings.TryGetValue("antigravityCachePath", out var value) &&
+            value.ValueKind == JsonValueKind.String &&
+            !string.IsNullOrWhiteSpace(value.GetString()))
+        {
+            return value.GetString()!;
+        }
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".config",
+            "tokscale",
+            "antigravity-cache");
+    }
+
+    /// <summary>
+    /// 保存 Antigravity tokscale 缓存目录。
+    /// </summary>
+    /// <param name="path">antigravity-cache 目录路径。</param>
+    public static void SaveAntigravityCachePath(string path)
+    {
+        var dict = ToMutableDictionary(Load());
+        dict["antigravityCachePath"] = path;
+        Save(dict);
+    }
+
+    /// <summary>
+    /// 本机 Cursor IDE globalStorage 数据库路径。
+    /// </summary>
+    /// <returns>state.vscdb 路径。</returns>
+    public static string CursorStateDbPath =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "Cursor",
+            "User",
+            "globalStorage",
+            "state.vscdb");
+
+    /// <summary>
+    /// 是否可能解析 Cursor 登录态（tokscale 凭证、应用内凭证或本机 state.vscdb）。
+    /// </summary>
+    /// <returns>存在可用凭证来源时返回 true。</returns>
+    public static bool CanResolveCursorAuth() =>
+        HasCursorSessionToken() || File.Exists(CursorStateDbPath);
+
+    /// <summary>
+    /// 读取已保存的 Cursor Session Token（掩码展示用，不返回明文时可为空）。
+    /// </summary>
+    /// <returns>是否已配置 token。</returns>
+    public static bool HasCursorSessionToken()
+    {
+        var tokscaleCredPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".config",
+            "tokscale",
+            "cursor-credentials.json");
+        if (File.Exists(tokscaleCredPath) && HasTokenInCredentialsFile(tokscaleCredPath))
+            return true;
+
+        var credPath = Path.Combine(AppDataDirectory, "cursor_credentials.json");
+        if (!File.Exists(credPath))
+            return false;
+        return HasTokenInCredentialsFile(credPath);
+    }
+
+    private static bool HasTokenInCredentialsFile(string credPath)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(credPath, Encoding.UTF8));
+            var root = doc.RootElement;
+            if (root.TryGetProperty("sessionToken", out var direct) &&
+                direct.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(direct.GetString()))
+                return true;
+            if (root.TryGetProperty("accounts", out var accounts) &&
+                root.TryGetProperty("activeAccountId", out var activeId) &&
+                accounts.ValueKind == JsonValueKind.Object &&
+                activeId.ValueKind == JsonValueKind.String &&
+                accounts.TryGetProperty(activeId.GetString()!, out var account) &&
+                account.TryGetProperty("sessionToken", out var token) &&
+                token.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(token.GetString()))
+                return true;
+        }
+        catch (JsonException)
+        {
+        }
+        catch (IOException)
+        {
+        }
+        return false;
+    }
+
     private static Dictionary<string, object?> ToMutableDictionary(IReadOnlyDictionary<string, JsonElement> settings)
     {
         var dict = new Dictionary<string, object?>(StringComparer.Ordinal);
