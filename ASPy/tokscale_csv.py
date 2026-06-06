@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from cursor_usage_api import default_usage_json_path, load_normalized_events_from_json
 from usage_common import cutoff_for_days, load_generic_cache, parse_time, tail, unix_ms, write_generic_cache
 
 
@@ -228,10 +229,144 @@ def build_session_catalog(loaded: dict[str, Any], client: str) -> dict[str, dict
     return catalog
 
 
+def load_json_events(cache_dir: Path, client: str, days: int, cache_path: Path | None) -> dict[str, Any] | None:
+    json_path = default_usage_json_path(cache_dir)
+    if not json_path.is_file():
+        return None
+    try:
+        stat = json_path.stat()
+    except OSError:
+        return None
+    cache_files = load_generic_cache(cache_path, days) if cache_path else {}
+    cached = cache_files.get(str(json_path))
+    if (
+        isinstance(cached, dict)
+        and cached.get("mtime_ns") == stat.st_mtime_ns
+        and cached.get("size") == stat.st_size
+        and isinstance(cached.get("events"), list)
+    ):
+        file_events = cached["events"]
+    else:
+        file_events = load_normalized_events_from_json(cache_dir, days)
+        if cache_path:
+            cache_files[str(json_path)] = {
+                "mtime_ns": stat.st_mtime_ns,
+                "size": stat.st_size,
+                "events": file_events,
+            }
+            write_generic_cache(cache_path, days, cache_files)
+    sessions: list[dict[str, Any]] = []
+    seen_sessions: set[str] = set()
+    for event in file_events:
+        sid = event.get("sid") or "unknown"
+        if sid in seen_sessions:
+            continue
+        seen_sessions.add(sid)
+        label = sid.split(":", 1)[-1]
+        sessions.append({"sid": sid, "file": str(json_path), "cwd": label, "model": event.get("model") or "unknown"})
+    return {
+        "sessions": sessions,
+        "events": file_events,
+        "ttfb_events": [],
+        "failure_events": [],
+        "limits": None,
+    }
+
+
 def load_tokscale_usage(cache_dir: Path, client: str, days: int, cache_path: Path | None) -> dict[str, Any]:
+    if client == "cursor":
+        json_loaded = load_json_events(cache_dir, client, days, cache_path)
+        now = datetime.now(timezone.utc)
+        cutoff = cutoff_for_days(days, now)
+        csv_loaded = load_csv_events(cache_dir, client, cutoff, cache_path, days)
+        if json_loaded and json_loaded.get("events"):
+            if not csv_loaded.get("events"):
+                return json_loaded
+            return merge_cursor_usage_sources(json_loaded, csv_loaded, client)
+        return csv_loaded
     now = datetime.now(timezone.utc)
     cutoff = cutoff_for_days(days, now)
     return load_csv_events(cache_dir, client, cutoff, cache_path, days)
+
+
+def merge_cursor_usage_sources(json_loaded: dict[str, Any], csv_loaded: dict[str, Any], client: str) -> dict[str, Any]:
+    """Merge Cursor Dashboard JSON with exported CSV history, deduping matching events."""
+    json_events = json_loaded.get("events") if isinstance(json_loaded.get("events"), list) else []
+    csv_events = csv_loaded.get("events") if isinstance(csv_loaded.get("events"), list) else []
+    merged_events: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+
+    for event in [*csv_events, *json_events]:
+        key = cursor_event_identity(event)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged_events.append(event)
+    merged_events.sort(key=lambda item: int(item.get("ts") or 0))
+
+    merged = {
+        "sessions": build_session_catalog_from_events(
+            [*as_list(csv_loaded.get("sessions")), *as_list(json_loaded.get("sessions"))],
+            merged_events,
+            client,
+        ),
+        "events": merged_events,
+        "ttfb_events": [],
+        "failure_events": [],
+        "limits": csv_loaded.get("limits") or json_loaded.get("limits"),
+    }
+    return merged
+
+
+def as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def cursor_event_identity(event: dict[str, Any]) -> tuple[Any, ...]:
+    usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+    return (
+        int(event.get("ts") or 0),
+        normalize_model_name(str(event.get("model") or "unknown"), "cursor"),
+        int(usage.get("input_tokens") or 0),
+        int(usage.get("cached_input_tokens") or 0),
+        int(usage.get("output_tokens") or 0),
+        int(usage.get("total_tokens") or 0),
+    )
+
+
+def build_session_catalog_from_events(
+    source_sessions: list[Any],
+    events: list[dict[str, Any]],
+    client: str,
+) -> list[dict[str, Any]]:
+    sessions: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for session in source_sessions:
+        if not isinstance(session, dict):
+            continue
+        sid = session.get("sid")
+        if not isinstance(sid, str) or not sid or sid in seen:
+            continue
+        seen.add(sid)
+        sessions.append(session)
+    for event in events:
+        sid = event.get("sid") or "unknown"
+        if sid in seen:
+            continue
+        seen.add(sid)
+        label = sid.split(":", 1)[-1]
+        sessions.append({"sid": sid, "file": "merged", "cwd": label or f"{client} session", "model": event.get("model") or "unknown"})
+    return sessions
+
+
+def total_tokens(events: list[dict[str, Any]]) -> int:
+    total = 0
+    for event in events:
+        usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+        value = usage.get("total_tokens")
+        if isinstance(value, int) and not isinstance(value, bool):
+            total += max(0, value)
+    return total
 
 
 def invalidate_parse_cache_entries(cache_path: Path | None, *file_paths: str | Path) -> None:

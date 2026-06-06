@@ -27,6 +27,9 @@ class CursorUsageStatsTests(unittest.TestCase):
             self.assertIn("history", payload["views"])
             self.assertEqual(len(payload["records"][0]), 8)
             self.assertEqual(payload["dataStatus"], "ok")
+            self.assertFalse(payload.get("syncAttempted"))
+            self.assertEqual(payload["sync"].get("engine"), "local-read")
+            self.assertTrue(payload["sync"].get("synced"))
 
     def test_empty_payload_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -34,9 +37,13 @@ class CursorUsageStatsTests(unittest.TestCase):
             with (
                 patch("cursor_usage_stats.probe_cursor_limits", return_value={"ok": False, "usage": None}),
                 patch("cursor_usage_stats.resolve_session_token", return_value=None),
-                patch("cursor_sync.resolve_sync_token", return_value=(None, None)),
+                patch(
+                    "cursor_usage_stats.sync_cursor_cache",
+                    return_value={"synced": False, "rows": 0, "error": "未检测到 Cursor 登录态。"},
+                ),
             ):
                 payload = cursor_stats.build_payload(cache_dir, 0, None, do_sync=True)
+            self.assertTrue(payload.get("syncAttempted"))
             self.assertEqual(payload["dataStatus"], "sync_failed")
             self.assertFalse(payload["sync"]["synced"])
             self.assertIn("未检测到 Cursor 登录态", payload["sync"]["error"])

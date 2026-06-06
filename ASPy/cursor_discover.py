@@ -38,13 +38,21 @@ def decode_jwt_sub(access_token: str) -> str | None:
     return str(sub).strip() if isinstance(sub, str) and sub.strip() else None
 
 
+def derive_dashboard_user_id(subject: str) -> str:
+    """Derive Dashboard cookie user id from JWT sub (provider|user_id -> user_id)."""
+    text = str(subject or "").strip()
+    if "|" in text:
+        return text.split("|", 1)[1].strip() or text
+    return text
+
+
 def build_workos_session_token(access_token: str, subject: str | None = None) -> str | None:
     token = access_token.strip()
     if not token:
         return None
     sub = subject or decode_jwt_sub(token)
     if sub:
-        return f"{sub}%3A%3A{token}"
+        return f"{derive_dashboard_user_id(sub)}%3A%3A{token}"
     return token
 
 
@@ -87,13 +95,42 @@ def discover_local_session_token(db_path: Path | None = None) -> dict[str, Any] 
     }
 
 
-def resolve_session_token() -> dict[str, Any] | None:
+def read_ide_access_token(db_path: Path | None = None) -> str | None:
+    """Read Cursor IDE JWT access token from state.vscdb."""
+    path = db_path or default_state_vscdb_path()
+    if path is None or not path.is_file():
+        return None
+    access_token = read_item_table_value(path, "cursorAuth/accessToken")
+    if not access_token:
+        return None
+    return access_token.strip() or None
+
+
+def iter_session_token_candidates() -> list[dict[str, Any]]:
+    """Return unique Cursor session tokens, preferring Dashboard browser cookies."""
+    from cursor_browser_cookies import discover_browser_dashboard_token
     from cursor_sync import read_credentials
 
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_candidate(item: dict[str, Any] | None) -> None:
+        if not item:
+            return
+        token = normalize_session_token(str(item.get("token") or ""))
+        if not token or token in seen:
+            return
+        seen.add(token)
+        candidates.append({**item, "token": token})
+
+    add_candidate(discover_browser_dashboard_token())
     stored = read_credentials()
     if stored:
-        return {"token": stored, "source": "credentials"}
-    discovered = discover_local_session_token()
-    if discovered:
-        return discovered
-    return None
+        add_candidate({"token": stored, "source": "credentials"})
+    add_candidate(discover_local_session_token())
+    return candidates
+
+
+def resolve_session_token() -> dict[str, Any] | None:
+    candidates = iter_session_token_candidates()
+    return candidates[0] if candidates else None

@@ -259,6 +259,11 @@ h2 {
   min-width: 620px;
 }
 
+.topbar-actions.compact-actions {
+  align-items: center;
+  justify-content: flex-end;
+}
+
 .path-field.token-field {
   min-width: 220px;
   max-width: 320px;

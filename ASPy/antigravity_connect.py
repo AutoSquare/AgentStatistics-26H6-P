@@ -7,6 +7,7 @@ import re
 import socket
 import ssl
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ CLI_LOG_PORT_PATTERN = re.compile(
     r"Language server listening on random port at (\d+) for (HTTPS \(gRPC\)|HTTP)",
     re.IGNORECASE,
 )
+_CONNECTION_CACHE: tuple[float, list["AntigravityConnection"]] | None = None
+_CONNECTION_CACHE_TTL_SEC = 12.0
 
 
 @dataclass
@@ -32,6 +35,7 @@ class AntigravityConnection:
     port: int
     csrf_token: str
     fingerprint: str
+    scheme: str = "https"
 
 
 def is_language_server_command(command: str) -> bool:
@@ -227,10 +231,21 @@ def connect_request(
         return None
 
 
-def probe_connect_scheme(port: int, csrf_token: str | None = None, timeout: int = 4) -> str | None:
+def probe_connect_scheme(
+    port: int,
+    csrf_token: str | None = None,
+    timeout: int = 4,
+    preferred_scheme: str | None = None,
+) -> str | None:
     body = {"wrapper_data": {}}
     path = f"{CONNECT_SERVICE}/GetUnleashData"
+    schemes: list[str] = []
+    if preferred_scheme in {"https", "http"}:
+        schemes.append(preferred_scheme)
     for scheme in ("https", "http"):
+        if scheme not in schemes:
+            schemes.append(scheme)
+    for scheme in schemes:
         payload = connect_request(f"{scheme}://127.0.0.1:{port}", path, csrf_token, body, timeout=timeout)
         if payload is not None:
             return scheme
@@ -239,7 +254,7 @@ def probe_connect_scheme(port: int, csrf_token: str | None = None, timeout: int 
 
 def probe_heartbeat(port: int, csrf_token: str | None) -> bool:
     body = {"uuid": "00000000-0000-0000-0000-000000000000"}
-    for scheme in ("http", "https"):
+    for scheme in ("https", "http"):
         payload = connect_request(f"{scheme}://127.0.0.1:{port}", f"{CONNECT_SERVICE}/Heartbeat", csrf_token, body, timeout=4)
         if payload is not None:
             return True
@@ -254,8 +269,13 @@ def candidate_probe_ports(process: dict[str, Any], ports: list[int]) -> list[int
     return sorted(set(candidates))
 
 
-def parse_cli_log_ports(max_files: int = 3) -> list[int]:
-    ports: list[int] = []
+def _scheme_from_cli_log_label(label: str) -> str:
+    return "https" if "https" in label.lower() else "http"
+
+
+def parse_cli_log_endpoints(max_files: int = 3) -> list[tuple[int, str]]:
+    endpoints: list[tuple[int, str]] = []
+    seen: set[tuple[int, str]] = set()
     for path in cli_log_paths()[:max_files]:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -266,9 +286,30 @@ def parse_cli_log_ports(max_files: int = 3) -> list[int]:
                 port = int(match.group(1))
             except ValueError:
                 continue
-            if 1 <= port < 65536 and port not in ports:
-                ports.append(port)
+            if not (1 <= port < 65536):
+                continue
+            scheme = _scheme_from_cli_log_label(match.group(2))
+            key = (port, scheme)
+            if key in seen:
+                continue
+            seen.add(key)
+            endpoints.append(key)
+    return endpoints
+
+
+def parse_cli_log_ports(max_files: int = 3) -> list[int]:
+    ports: list[int] = []
+    for port, _scheme in parse_cli_log_endpoints(max_files):
+        if port not in ports:
+            ports.append(port)
     return ports
+
+
+def cli_log_scheme_for_port(port: int, max_files: int = 3) -> str | None:
+    for logged_port, scheme in parse_cli_log_endpoints(max_files):
+        if logged_port == port:
+            return scheme
+    return None
 
 
 def list_runtime_processes_windows() -> list[dict[str, Any]]:
@@ -330,11 +371,17 @@ def append_connection(
     port: int,
     csrf_token: str | None,
     probe_timeout: int = 2,
+    preferred_scheme: str | None = None,
 ) -> None:
     key = (pid, port)
     if key in seen:
         return
-    scheme = probe_connect_scheme(port, csrf_token, timeout=probe_timeout)
+    scheme = probe_connect_scheme(
+        port,
+        csrf_token,
+        timeout=probe_timeout,
+        preferred_scheme=preferred_scheme or cli_log_scheme_for_port(port),
+    )
     if not scheme:
         return
     seen.add(key)
@@ -344,6 +391,7 @@ def append_connection(
             port=port,
             csrf_token=csrf_token or "",
             fingerprint=f"pid:{pid}:port:{port}",
+            scheme=scheme,
         )
     )
 
@@ -360,7 +408,12 @@ def ordered_probe_ports(process: dict[str, Any], preferred_ports: list[int] | No
     return ports[:8]
 
 
-def detect_connections() -> list[AntigravityConnection]:
+def invalidate_connection_cache() -> None:
+    global _CONNECTION_CACHE
+    _CONNECTION_CACHE = None
+
+
+def _detect_connections_uncached() -> list[AntigravityConnection]:
     connections: list[AntigravityConnection] = []
     seen: set[tuple[int, int]] = set()
     language_server_processes = list_process_candidates_windows()
@@ -383,7 +436,14 @@ def detect_connections() -> list[AntigravityConnection]:
         preferred_ports = [port for port in parse_cli_log_ports() if port in listening]
         for port in ordered_probe_ports(process, preferred_ports):
             before = len(seen)
-            append_connection(connections, seen, pid, port, csrf_text)
+            append_connection(
+                connections,
+                seen,
+                pid,
+                port,
+                csrf_text,
+                preferred_scheme=cli_log_scheme_for_port(port),
+            )
             if len(seen) > before:
                 break
     connections.sort(key=lambda item: (-max(item.pid, 0), item.port))
@@ -397,18 +457,27 @@ def detect_connections() -> list[AntigravityConnection]:
     return deduped
 
 
+def detect_connections(force: bool = False) -> list[AntigravityConnection]:
+    global _CONNECTION_CACHE
+    now = time.monotonic()
+    if not force and _CONNECTION_CACHE is not None:
+        cached_at, cached = _CONNECTION_CACHE
+        if now - cached_at < _CONNECTION_CACHE_TTL_SEC:
+            return list(cached)
+    connections = _detect_connections_uncached()
+    _CONNECTION_CACHE = (now, connections)
+    return list(connections)
+
+
 def rpc_request(connection: AntigravityConnection, method: str, body: dict[str, Any] | None = None) -> dict[str, Any] | None:
     path = f"{CONNECT_SERVICE}/{method}"
-    for scheme in ("http", "https"):
-        payload = connect_request(
-            f"{scheme}://127.0.0.1:{connection.port}",
-            path,
-            connection.csrf_token,
-            body,
-        )
-        if payload is not None:
-            return payload
-    return None
+    scheme = connection.scheme if connection.scheme in {"http", "https"} else "https"
+    return connect_request(
+        f"{scheme}://127.0.0.1:{connection.port}",
+        path,
+        connection.csrf_token,
+        body,
+    )
 
 
 def discover_connect_base(process: dict[str, Any]) -> str | None:

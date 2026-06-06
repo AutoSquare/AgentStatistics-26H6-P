@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Windows;
 using AgentStatistics.Services;
 using AgentStatistics.ViewModel;
@@ -18,18 +19,25 @@ public partial class MainWindow : Window
     private readonly MainWindowViewModel _viewModel;
     private readonly CodexUsageService _codexUsageService = CompositionRoot.CodexUsageService;
     private readonly CursorUsageService _cursorUsageService = CompositionRoot.CursorUsageService;
+    private readonly CursorWebSyncService _cursorWebSyncService = CompositionRoot.CursorWebSyncService;
     private readonly AntigravityUsageService _antigravityUsageService = CompositionRoot.AntigravityUsageService;
     private readonly DispatcherTimer _refreshDebounceTimer;
     private readonly DispatcherTimer _dashboardResizeTimer;
+    private readonly DispatcherTimer _antigravityAutoSyncTimer;
+    private readonly DispatcherTimer _cursorAutoSyncTimer;
     private FileSystemWatcher? _codexWatcher;
     private FileSystemWatcher? _cursorWatcher;
     private FileSystemWatcher? _antigravityWatcher;
-    private CancellationTokenSource? _scanCts;
+    private readonly List<FileSystemWatcher> _antigravityTranscriptWatchers = new();
+    private readonly Dictionary<string, CancellationTokenSource> _scanCtsBySource = new(StringComparer.Ordinal);
     private readonly HashSet<string> _pendingRefresh = new(StringComparer.Ordinal);
     private readonly HashSet<string> _runningRefresh = new(StringComparer.Ordinal);
     private string _codexSessionsPath = string.Empty;
     private string _cursorCachePath = string.Empty;
     private string _antigravityCachePath = string.Empty;
+    private bool _antigravityForceSync;
+    private bool _cursorForceSync;
+    private bool _cursorForceFullSync;
 
     /// <summary>
     /// 初始化主窗口并注入视图模型。
@@ -44,6 +52,10 @@ public partial class MainWindow : Window
         _refreshDebounceTimer.Tick += OnRefreshDebounceTick;
         _dashboardResizeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(160) };
         _dashboardResizeTimer.Tick += OnDashboardResizeTimerTick;
+        _antigravityAutoSyncTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
+        _antigravityAutoSyncTimer.Tick += OnAntigravityAutoSyncTimerTick;
+        _cursorAutoSyncTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
+        _cursorAutoSyncTimer.Tick += OnCursorAutoSyncTimerTick;
         _viewModel = CompositionRoot.BuildViewModel();
         DataContext = _viewModel;
         ApplicationBootstrap.OnStartup(_viewModel);
@@ -60,7 +72,7 @@ public partial class MainWindow : Window
         _antigravityCachePath = UserSettingsStore.LoadAntigravityCachePath();
         await InitializeDashboardAsync().ConfigureAwait(true);
         ConfigureCodexWatcher(_codexSessionsPath);
-        ConfigureCsvWatcher(ref _cursorWatcher, _cursorCachePath, "cursor");
+        ConfigureCursorWatcher(_cursorCachePath);
         ConfigureAntigravityWatcher(_antigravityCachePath);
     }
 
@@ -70,10 +82,13 @@ public partial class MainWindow : Window
     /// <param name="e">关闭事件参数。</param>
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
-        _scanCts?.Cancel();
+        CancelAllScans();
         _codexWatcher?.Dispose();
         _cursorWatcher?.Dispose();
         _antigravityWatcher?.Dispose();
+        ClearAntigravityTranscriptWatchers();
+        _antigravityAutoSyncTimer.Stop();
+        _cursorAutoSyncTimer.Stop();
         CompositionRoot.CalculationRunCoordinator.CancelAndKillAll();
         ApplicationBootstrap.SaveWindowGeometry(this);
         ProjectSession.Live.PersistOnExit(ProjectSession.BuildUiState(_viewModel.StatusText));
@@ -87,6 +102,7 @@ public partial class MainWindow : Window
         {
             ConfigureWebView2UserDataFolder();
             await DashboardWebView.EnsureCoreWebView2Async().ConfigureAwait(true);
+            await EnsureCursorSyncWebViewAsync().ConfigureAwait(true);
             DashboardWebView.CoreWebView2.WebMessageReceived += OnWebMessageReceived;
             var indexPath = FindDashboardIndexPath();
             if (indexPath is null)
@@ -117,8 +133,62 @@ public partial class MainWindow : Window
             return;
 
         Directory.CreateDirectory(UserSettingsStore.WebView2UserDataDirectory);
+        var userDataFolder = UserSettingsStore.WebView2UserDataDirectory;
         DashboardWebView.CreationProperties ??= new CoreWebView2CreationProperties();
-        DashboardWebView.CreationProperties.UserDataFolder = UserSettingsStore.WebView2UserDataDirectory;
+        DashboardWebView.CreationProperties.UserDataFolder = userDataFolder;
+        CursorSyncWebView.CreationProperties ??= new CoreWebView2CreationProperties();
+        CursorSyncWebView.CreationProperties.UserDataFolder = userDataFolder;
+    }
+
+    /// <summary>
+    /// 初始化用于 Cursor 云端同步的隐藏 WebView2，与仪表盘共享运行时环境。
+    /// </summary>
+    private async Task EnsureCursorSyncWebViewAsync()
+    {
+        if (CursorSyncWebView.CoreWebView2 is not null)
+            return;
+        if (DashboardWebView.CoreWebView2 is null)
+            await DashboardWebView.EnsureCoreWebView2Async().ConfigureAwait(true);
+        var environment = DashboardWebView.CoreWebView2?.Environment;
+        if (environment is null)
+            return;
+        await CursorSyncWebView.EnsureCoreWebView2Async(environment).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// 在 WPF UI 线程执行 Cursor WebView2 官网同步；<see cref="CoreWebView2"/> 成员禁止在后台线程访问。
+    /// </summary>
+    /// <param name="cancellationToken">取消标记。</param>
+    private async Task RunCursorWebSyncOnUiThreadAsync(CancellationToken cancellationToken)
+    {
+        var sessionToken = await CompositionRoot.CursorSessionResolver
+            .ResolveSessionTokenAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        async Task RunAsync()
+        {
+            await EnsureCursorSyncWebViewAsync().ConfigureAwait(true);
+            if (CursorSyncWebView.CoreWebView2 is null)
+            {
+                CursorWebSyncLog.Write("cursor web sync skipped: CoreWebView2 unavailable");
+                return;
+            }
+
+            await _cursorWebSyncService.TrySyncDashboardAsync(
+                _cursorCachePath,
+                UserSettingsStore.AppDataDirectory,
+                CursorSyncWebView.CoreWebView2,
+                sessionToken,
+                cancellationToken).ConfigureAwait(true);
+        }
+
+        if (Dispatcher.CheckAccess())
+        {
+            await RunAsync().ConfigureAwait(true);
+            return;
+        }
+
+        await Dispatcher.InvokeAsync(RunAsync).Task.Unwrap().ConfigureAwait(true);
     }
 
     private void OnDashboardHostResized(object? sender, EventArgs e)
@@ -183,17 +253,19 @@ public partial class MainWindow : Window
                 case "ready":
                     PostSettings();
                     QueueRefresh("codex", TimeSpan.FromMilliseconds(100));
-                    QueueRefresh("cursor", TimeSpan.FromMilliseconds(150));
-                    QueueRefresh("antigravity", TimeSpan.FromMilliseconds(200));
+                    QueueCursorRefresh(TimeSpan.FromMilliseconds(150), sync: false);
+                    QueueCursorRefresh(TimeSpan.FromMilliseconds(1500), sync: true, forceFullSync: true);
+                    QueueAntigravityRefresh(TimeSpan.FromMilliseconds(200), sync: false);
+                    QueueAntigravityRefresh(TimeSpan.FromMilliseconds(1200), sync: true);
                     break;
                 case "refresh":
                     QueueRefresh("codex", TimeSpan.Zero);
                     break;
                 case "refreshCursor":
-                    QueueRefresh("cursor", TimeSpan.Zero);
+                    QueueCursorRefresh(TimeSpan.Zero, sync: true, forceFullSync: true);
                     break;
                 case "refreshAntigravity":
-                    QueueRefresh("antigravity", TimeSpan.Zero);
+                    QueueAntigravityRefresh(TimeSpan.Zero, sync: true);
                     break;
                 case "setCodexRoot":
                     if (root.TryGetProperty("path", out var codexPathElement))
@@ -226,7 +298,7 @@ public partial class MainWindow : Window
                         if (!string.IsNullOrWhiteSpace(token))
                         {
                             await SaveCursorTokenAsync(token).ConfigureAwait(true);
-                            QueueRefresh("cursor", TimeSpan.Zero);
+                            QueueCursorRefresh(TimeSpan.Zero, sync: true, forceFullSync: true);
                         }
                     }
                     break;
@@ -263,8 +335,10 @@ public partial class MainWindow : Window
     {
         _cursorCachePath = path.Trim();
         UserSettingsStore.SaveCursorCachePath(_cursorCachePath);
-        ConfigureCsvWatcher(ref _cursorWatcher, _cursorCachePath, "cursor");
+        ConfigureCursorWatcher(_cursorCachePath);
         PostSettings();
+        _cursorForceSync = true;
+        _cursorForceFullSync = true;
         await RefreshSourceAsync("cursor").ConfigureAwait(true);
     }
 
@@ -274,6 +348,7 @@ public partial class MainWindow : Window
         UserSettingsStore.SaveAntigravityCachePath(_antigravityCachePath);
         ConfigureAntigravityWatcher(_antigravityCachePath);
         PostSettings();
+        _antigravityForceSync = true;
         await RefreshSourceAsync("antigravity").ConfigureAwait(true);
     }
 
@@ -338,6 +413,7 @@ public partial class MainWindow : Window
     {
         _antigravityWatcher?.Dispose();
         _antigravityWatcher = null;
+        ClearAntigravityTranscriptWatchers();
         var sessionsPath = Path.Combine(path, "sessions");
         if (!Directory.Exists(sessionsPath))
             Directory.CreateDirectory(sessionsPath);
@@ -348,11 +424,125 @@ public partial class MainWindow : Window
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime,
             EnableRaisingEvents = true,
         };
-        _antigravityWatcher.Changed += (_, _) => Dispatcher.Invoke(() => QueueRefresh("antigravity", TimeSpan.FromMilliseconds(900)));
-        _antigravityWatcher.Created += (_, _) => Dispatcher.Invoke(() => QueueRefresh("antigravity", TimeSpan.FromMilliseconds(900)));
-        _antigravityWatcher.Deleted += (_, _) => Dispatcher.Invoke(() => QueueRefresh("antigravity", TimeSpan.FromMilliseconds(900)));
-        _antigravityWatcher.Renamed += (_, _) => Dispatcher.Invoke(() => QueueRefresh("antigravity", TimeSpan.FromMilliseconds(900)));
-        PostJson("""{"type":"watcher","source":"antigravity","active":true,"message":"正在监听 Antigravity sessions JSONL 缓存。"}""");
+        _antigravityWatcher.Changed += (_, _) => Dispatcher.Invoke(() => QueueAntigravityRefresh(TimeSpan.FromMilliseconds(300), sync: false));
+        _antigravityWatcher.Created += (_, _) => Dispatcher.Invoke(() => QueueAntigravityRefresh(TimeSpan.FromMilliseconds(300), sync: false));
+        _antigravityWatcher.Deleted += (_, _) => Dispatcher.Invoke(() => QueueAntigravityRefresh(TimeSpan.FromMilliseconds(300), sync: false));
+        _antigravityWatcher.Renamed += (_, _) => Dispatcher.Invoke(() => QueueAntigravityRefresh(TimeSpan.FromMilliseconds(300), sync: false));
+        ConfigureAntigravityTranscriptWatchers();
+        _antigravityAutoSyncTimer.Stop();
+        _antigravityAutoSyncTimer.Start();
+        PostJson("""{"type":"watcher","source":"antigravity","active":true,"message":"正在监听 Antigravity 用量缓存。"}""");
+    }
+
+    private void ConfigureAntigravityTranscriptWatchers()
+    {
+        foreach (var root in DefaultAntigravityDataRoots())
+        {
+            var brainPath = Path.Combine(root, "brain");
+            if (!Directory.Exists(brainPath))
+                continue;
+
+            var watcher = new FileSystemWatcher(brainPath, "*.jsonl")
+            {
+                IncludeSubdirectories = true,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime,
+                EnableRaisingEvents = true,
+            };
+            watcher.Changed += (_, _) => Dispatcher.Invoke(() => QueueAntigravityRefresh(TimeSpan.FromMilliseconds(300), sync: false));
+            watcher.Created += (_, _) => Dispatcher.Invoke(() => QueueAntigravityRefresh(TimeSpan.FromMilliseconds(300), sync: false));
+            watcher.Deleted += (_, _) => Dispatcher.Invoke(() => QueueAntigravityRefresh(TimeSpan.FromMilliseconds(300), sync: false));
+            watcher.Renamed += (_, _) => Dispatcher.Invoke(() => QueueAntigravityRefresh(TimeSpan.FromMilliseconds(300), sync: false));
+            _antigravityTranscriptWatchers.Add(watcher);
+        }
+    }
+
+    private void ClearAntigravityTranscriptWatchers()
+    {
+        foreach (var watcher in _antigravityTranscriptWatchers)
+            watcher.Dispose();
+        _antigravityTranscriptWatchers.Clear();
+    }
+
+    private static IEnumerable<string> DefaultAntigravityDataRoots()
+    {
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrWhiteSpace(home))
+            yield break;
+
+        var gemini = Path.Combine(home, ".gemini");
+        yield return Path.Combine(gemini, "antigravity-cli");
+        yield return Path.Combine(gemini, "antigravity");
+        yield return Path.Combine(gemini, "antigravity-ide");
+        yield return Path.Combine(gemini, "antigravity-backup");
+    }
+
+    private void OnCursorAutoSyncTimerTick(object? sender, EventArgs e)
+    {
+        if (_runningRefresh.Contains("cursor") || _pendingRefresh.Contains("cursor"))
+            return;
+        QueueCursorRefresh(TimeSpan.FromMilliseconds(1), sync: true, forceFullSync: true);
+    }
+
+    private void QueueCursorRefresh(TimeSpan delay, bool sync, bool forceFullSync = false)
+    {
+        if (sync)
+            _cursorForceSync = true;
+        if (forceFullSync)
+            _cursorForceFullSync = true;
+        QueueRefresh("cursor", delay);
+    }
+
+    private void ConfigureCursorWatcher(string path)
+    {
+        _cursorWatcher?.Dispose();
+        _cursorWatcher = null;
+        if (!Directory.Exists(path))
+            Directory.CreateDirectory(path);
+
+        _cursorWatcher = new FileSystemWatcher(path)
+        {
+            Filter = "*.*",
+            IncludeSubdirectories = false,
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime,
+            EnableRaisingEvents = true,
+        };
+        _cursorWatcher.Changed += (_, e) => Dispatcher.Invoke(() =>
+        {
+            if (IsCursorCacheArtifact(e.Name))
+                QueueCursorRefresh(TimeSpan.FromMilliseconds(300), sync: false);
+        });
+        _cursorWatcher.Created += (_, e) => Dispatcher.Invoke(() =>
+        {
+            if (IsCursorCacheArtifact(e.Name))
+                QueueCursorRefresh(TimeSpan.FromMilliseconds(300), sync: false);
+        });
+        _cursorWatcher.Deleted += (_, e) => Dispatcher.Invoke(() =>
+        {
+            if (IsCursorCacheArtifact(e.Name))
+                QueueCursorRefresh(TimeSpan.FromMilliseconds(300), sync: false);
+        });
+        _cursorWatcher.Renamed += (_, e) => Dispatcher.Invoke(() =>
+        {
+            if (IsCursorCacheArtifact(e.Name) || IsCursorCacheArtifact(e.OldName))
+                QueueCursorRefresh(TimeSpan.FromMilliseconds(300), sync: false);
+        });
+        _cursorAutoSyncTimer.Stop();
+        _cursorAutoSyncTimer.Start();
+        PostJson("""{"type":"watcher","source":"cursor","active":true,"message":"正在监听 Cursor 用量缓存。"}""");
+    }
+
+    private void OnAntigravityAutoSyncTimerTick(object? sender, EventArgs e)
+    {
+        if (_runningRefresh.Count > 0 || _pendingRefresh.Contains("antigravity"))
+            return;
+        QueueAntigravityRefresh(TimeSpan.FromMilliseconds(1), sync: true);
+    }
+
+    private void QueueAntigravityRefresh(TimeSpan delay, bool sync)
+    {
+        if (sync)
+            _antigravityForceSync = true;
+        QueueRefresh("antigravity", delay);
     }
 
     private void ConfigureCsvWatcher(ref FileSystemWatcher? watcher, string path, string source)
@@ -390,8 +580,32 @@ public partial class MainWindow : Window
         _refreshDebounceTimer.Stop();
         var targets = _pendingRefresh.ToArray();
         _pendingRefresh.Clear();
-        foreach (var source in targets)
-            await RefreshSourceAsync(source).ConfigureAwait(true);
+        await Task.WhenAll(targets.Select(RefreshSourceAsync)).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// 取消指定 Agent 正在进行的扫描；不影响其他 Agent。
+    /// </summary>
+    /// <param name="source">Agent 标识：codex、cursor、antigravity。</param>
+    private void CancelScan(string source)
+    {
+        if (!_scanCtsBySource.TryGetValue(source, out var cts))
+            return;
+        cts.Cancel();
+        cts.Dispose();
+        _scanCtsBySource.Remove(source);
+    }
+
+    /// <summary>
+    /// 取消全部 Agent 扫描，用于窗口关闭。
+    /// </summary>
+    private void CancelAllScans()
+    {
+        foreach (var cts in _scanCtsBySource.Values)
+            cts.Cancel();
+        foreach (var cts in _scanCtsBySource.Values)
+            cts.Dispose();
+        _scanCtsBySource.Clear();
     }
 
     private async Task RefreshSourceAsync(string source)
@@ -404,8 +618,9 @@ public partial class MainWindow : Window
         }
 
         _runningRefresh.Add(source);
-        _scanCts?.Cancel();
-        _scanCts = new CancellationTokenSource();
+        CancelScan(source);
+        var scanCts = new CancellationTokenSource();
+        _scanCtsBySource[source] = scanCts;
         try
         {
             switch (source)
@@ -413,26 +628,51 @@ public partial class MainWindow : Window
                 case "codex":
                     _viewModel.StatusText = "正在扫描 Codex 用量...";
                     PostJson("""{"type":"status","source":"codex","status":"scanning","message":"正在扫描 Codex 会话日志..."}""");
-                    var codexPayload = await _codexUsageService.GenerateAsync(_codexSessionsPath, _scanCts.Token).ConfigureAwait(true);
+                    var codexPayload = await _codexUsageService.GenerateAsync(_codexSessionsPath, scanCts.Token).ConfigureAwait(true);
                     _viewModel.StatusText = "Codex 用量统计已刷新";
                     PostJson($$"""{"type":"codexData","payload":{{codexPayload}}}""");
                     PostJson("""{"type":"status","source":"codex","status":"idle","message":"已同步 Codex 用量。"}""");
                     break;
                 case "cursor":
+                    var cursorSync = _cursorForceSync;
+                    var cursorForceFullSync = _cursorForceFullSync;
+                    _cursorForceSync = false;
+                    _cursorForceFullSync = false;
                     _viewModel.StatusText = "正在扫描 Cursor 用量...";
-                    PostJson("""{"type":"status","source":"cursor","status":"scanning","message":"正在扫描 Cursor 缓存并尝试同步..."}""");
-                    var cursorPayload = await _cursorUsageService.GenerateAsync(_cursorCachePath, sync: true, cancellationToken: _scanCts.Token).ConfigureAwait(true);
+                    PostJson("""{"type":"status","source":"cursor","status":"scanning","message":"正在扫描 Cursor 用量..."}""");
+                    var localPayload = await _cursorUsageService.GenerateAsync(
+                        _cursorCachePath,
+                        sync: false,
+                        forceSync: false,
+                        skipCloudSync: true,
+                        cancellationToken: scanCts.Token).ConfigureAwait(true);
+                    PostJson($$"""{"type":"cursorData","payload":{{localPayload}}}""");
+
+                    if (cursorSync)
+                    {
+                        PostJson("""{"type":"status","source":"cursor","status":"scanning","message":"已加载本地用量，正在后台同步 Cursor 官网..."}""");
+                        await RunCursorWebSyncOnUiThreadAsync(scanCts.Token).ConfigureAwait(true);
+                    }
+
+                    var cursorPayload = await _cursorUsageService.GenerateAsync(
+                        _cursorCachePath,
+                        sync: cursorSync,
+                        forceSync: cursorForceFullSync,
+                        skipCloudSync: true,
+                        cancellationToken: scanCts.Token).ConfigureAwait(true);
                     var cursorStatusMessage = BuildCursorStatusMessage(cursorPayload);
-                    _viewModel.StatusText = cursorStatusMessage;
+                    _viewModel.StatusText = "Cursor 用量统计已刷新";
                     PostJson($$"""{"type":"cursorData","payload":{{cursorPayload}}}""");
                     PostJson($$"""{"type":"status","source":"cursor","status":"idle","message":{{JsonSerializer.Serialize(cursorStatusMessage)}}}""");
                     break;
                 case "antigravity":
+                    var antigravitySync = _antigravityForceSync;
+                    _antigravityForceSync = false;
                     _viewModel.StatusText = "正在扫描 Antigravity 用量...";
-                    PostJson("""{"type":"status","source":"antigravity","status":"scanning","message":"正在从 Antigravity CLI 同步并扫描本地缓存..."}""");
-                    var antigravityPayload = await _antigravityUsageService.GenerateAsync(_antigravityCachePath, sync: true, _scanCts.Token).ConfigureAwait(true);
+                    PostJson("""{"type":"status","source":"antigravity","status":"scanning","message":"正在扫描 Antigravity 用量..."}""");
+                    var antigravityPayload = await _antigravityUsageService.GenerateAsync(_antigravityCachePath, sync: antigravitySync, scanCts.Token).ConfigureAwait(true);
                     var antigravityStatusMessage = BuildAntigravityStatusMessage(antigravityPayload);
-                    _viewModel.StatusText = antigravityStatusMessage;
+                    _viewModel.StatusText = "Antigravity 用量统计已刷新";
                     PostJson($$"""{"type":"antigravityData","payload":{{antigravityPayload}}}""");
                     PostJson($$"""{"type":"status","source":"antigravity","status":"idle","message":{{JsonSerializer.Serialize(antigravityStatusMessage)}}}""");
                     break;
@@ -450,9 +690,27 @@ public partial class MainWindow : Window
         finally
         {
             _runningRefresh.Remove(source);
+            if (_scanCtsBySource.TryGetValue(source, out var activeCts) && ReferenceEquals(activeCts, scanCts))
+            {
+                _scanCtsBySource.Remove(source);
+                scanCts.Dispose();
+            }
             if (_pendingRefresh.Count > 0)
-                QueueRefresh(_pendingRefresh.First(), TimeSpan.FromMilliseconds(50));
+            {
+                _refreshDebounceTimer.Stop();
+                _refreshDebounceTimer.Interval = TimeSpan.FromMilliseconds(50);
+                _refreshDebounceTimer.Start();
+            }
         }
+    }
+
+    private static bool IsCursorCacheArtifact(string? fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+            return false;
+        return fileName.Equals("usage.json", StringComparison.OrdinalIgnoreCase)
+            || fileName.StartsWith("usage", StringComparison.OrdinalIgnoreCase)
+                && fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string BuildAntigravityStatusMessage(string payloadJson)
@@ -466,7 +724,7 @@ public partial class MainWindow : Window
             if (root.TryGetProperty("records", out var recordsElement) && recordsElement.ValueKind == JsonValueKind.Array)
                 recordCount = recordsElement.GetArrayLength();
             if (string.Equals(dataStatus, "ok", StringComparison.Ordinal) && recordCount > 0)
-                return $"已同步 Antigravity 用量（{recordCount} 条记录）。";
+                return "已同步 Antigravity 用量。";
             if (root.TryGetProperty("sync", out var syncElement) && syncElement.ValueKind == JsonValueKind.Object &&
                 syncElement.TryGetProperty("error", out var errorElement) && errorElement.ValueKind == JsonValueKind.String)
             {
@@ -474,13 +732,9 @@ public partial class MainWindow : Window
                 if (!string.IsNullOrWhiteSpace(error))
                     return error;
             }
-            if (string.Equals(dataStatus, "parse_empty", StringComparison.Ordinal))
-                return "已连接 Antigravity，但未解析到有效用量记录。";
-            if (string.Equals(dataStatus, "sync_failed", StringComparison.Ordinal))
-                return "Antigravity 同步失败，请运行 agy CLI 或确认本地缓存已有数据。";
             if (string.Equals(dataStatus, "empty", StringComparison.Ordinal))
-                return "暂无 Antigravity 用量，请运行 agy CLI 对话后刷新。";
-            return "Antigravity 扫描完成，但未找到可用用量。";
+                return "暂无 Antigravity 用量。";
+            return "Antigravity 用量统计已刷新。";
         }
         catch (JsonException)
         {
@@ -499,7 +753,7 @@ public partial class MainWindow : Window
             if (root.TryGetProperty("records", out var recordsElement) && recordsElement.ValueKind == JsonValueKind.Array)
                 recordCount = recordsElement.GetArrayLength();
             if (string.Equals(dataStatus, "ok", StringComparison.Ordinal) && recordCount > 0)
-                return $"已同步 Cursor 用量（{recordCount} 条记录）。";
+                return "已同步 Cursor 用量。";
             if (root.TryGetProperty("sync", out var syncElement) && syncElement.ValueKind == JsonValueKind.Object &&
                 syncElement.TryGetProperty("error", out var errorElement) && errorElement.ValueKind == JsonValueKind.String)
             {
@@ -507,11 +761,9 @@ public partial class MainWindow : Window
                 if (!string.IsNullOrWhiteSpace(error))
                     return error;
             }
-            if (string.Equals(dataStatus, "parse_empty", StringComparison.Ordinal))
-                return "CSV 已同步，但未解析到有效用量行。";
             if (string.Equals(dataStatus, "empty", StringComparison.Ordinal))
-                return "暂无 Cursor 用量数据，请配置 Session Token 后刷新。";
-            return "Cursor 扫描完成，但未找到可用用量。";
+                return "暂无 Cursor 用量。";
+            return "Cursor 用量统计已刷新。";
         }
         catch (JsonException)
         {
@@ -527,7 +779,22 @@ public partial class MainWindow : Window
             PostJson($$"""{"type":"status","source":{{JsonSerializer.Serialize(source)}},"status":"error","message":{{JsonSerializer.Serialize(message)}}}""");
     }
 
+    /// <summary>
+    /// 向前端 WebView 投递 JSON 消息；可在后台线程调用，内部会切回 UI 线程。
+    /// </summary>
+    /// <param name="json">已序列化的 JSON 文本。</param>
     private void PostJson(string json)
+    {
+        if (Dispatcher.CheckAccess())
+        {
+            PostJsonCore(json);
+            return;
+        }
+
+        Dispatcher.BeginInvoke(PostJsonCore, json);
+    }
+
+    private void PostJsonCore(string json)
     {
         if (DashboardWebView.CoreWebView2 is null)
             return;

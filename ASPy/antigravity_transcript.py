@@ -9,6 +9,7 @@ from typing import Any
 
 from antigravity_jsonl import parse_timestamp_ms, resolve_model_alias, to_safe_int
 from antigravity_paths import antigravity_data_roots, transcript_log_globs
+from antigravity_usage_fields import build_antigravity_usage
 from usage_common import cutoff_for_days, load_generic_cache, unix_ms, write_generic_cache
 
 USAGE_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
@@ -142,24 +143,18 @@ def parse_transcript_text(text: str, session_id: str, cutoff_ms: int) -> list[di
             if dedup_key in seen_response_ids:
                 continue
             seen_response_ids.add(dedup_key)
-        input_tokens = usage["input"]
-        output_tokens = usage["output"]
-        cache_read = usage["cacheRead"]
-        cache_write = usage["cacheWrite"]
-        reasoning = usage["reasoning"]
-        total_tokens = input_tokens + output_tokens + reasoning
         events.append(
             {
                 "ts": timestamp,
                 "sid": f"antigravity:{session_id}",
                 "model": model,
-                "usage": {
-                    "input_tokens": input_tokens,
-                    "cached_input_tokens": cache_read + cache_write,
-                    "output_tokens": output_tokens,
-                    "reasoning_output_tokens": reasoning,
-                    "total_tokens": total_tokens,
-                },
+                "usage": build_antigravity_usage(
+                    usage["input"],
+                    usage["output"],
+                    usage["cacheRead"],
+                    usage["cacheWrite"],
+                    usage["reasoning"],
+                ),
                 "cost": 0.0,
             }
         )

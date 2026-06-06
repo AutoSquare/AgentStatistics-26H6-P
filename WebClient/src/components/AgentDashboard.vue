@@ -324,10 +324,12 @@ function buildHistoryCharts(records: AgentPayload["records"], start: number, end
         distribution: [ts, 0, 0, 0]
       };
     const cost = priceRecord(row);
+    const input = row[3] || 0;
+    const cached = Math.min(input, row[4] || 0);
     bucket.trend[1] += row[7] || 0;
-    bucket.trend[2] += row[4] || 0;
+    bucket.trend[2] += cached;
     bucket.trend[3] += row[5] || 0;
-    bucket.trend[4] += row[3] || 0;
+    bucket.trend[4] += input - cached;
     bucket.trend[5] += row[6] || 0;
     bucket.trend[6] += 1;
     bucket.trend[7] += cost;

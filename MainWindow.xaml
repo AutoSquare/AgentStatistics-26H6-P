@@ -11,5 +11,11 @@
         <wv2:WebView2 x:Name="DashboardWebView"
                       HorizontalAlignment="Stretch"
                       VerticalAlignment="Stretch"/>
+        <wv2:WebView2 x:Name="CursorSyncWebView"
+                      Width="1"
+                      Height="1"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Bottom"
+                      IsHitTestVisible="False"/>
     </Grid>
 </Window>

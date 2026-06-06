@@ -24,8 +24,11 @@ class AntigravityTranscriptTests(unittest.TestCase):
         }
         events = transcript.parse_transcript_text(json.dumps(row) + "\n", "session-1", 0)
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["usage"]["input_tokens"], 12)
-        self.assertEqual(events[0]["usage"]["output_tokens"], 4)
+        self.assertEqual(events[0]["usage"]["input_tokens"], 14)
+        self.assertEqual(events[0]["usage"]["cached_input_tokens"], 2)
+        self.assertEqual(events[0]["usage"]["output_tokens"], 3)
+        self.assertEqual(events[0]["usage"]["reasoning_output_tokens"], 1)
+        self.assertEqual(events[0]["usage"]["total_tokens"], 18)
 
     def test_load_transcript_from_brain_layout(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

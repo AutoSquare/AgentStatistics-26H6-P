@@ -38,8 +38,10 @@ class AntigravityJsonlTests(unittest.TestCase):
         events = jsonl.parse_jsonl_text(sample, cutoff_ms=0)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["sid"], "antigravity:abc")
-        self.assertEqual(events[0]["usage"]["input_tokens"], 12)
+        self.assertEqual(events[0]["usage"]["input_tokens"], 14)
+        self.assertEqual(events[0]["usage"]["cached_input_tokens"], 2)
         self.assertEqual(events[0]["usage"]["reasoning_output_tokens"], 1)
+        self.assertEqual(events[0]["usage"]["total_tokens"], 18)
 
     def test_load_antigravity_usage_from_sessions_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -67,6 +69,43 @@ class AntigravityJsonlTests(unittest.TestCase):
             loaded = jsonl.load_antigravity_usage(cache_dir, 0, None)
             self.assertEqual(len(loaded["events"]), 1)
             self.assertEqual(loaded["events"][0]["model"], "gemini-3-flash")
+
+    def test_manifest_artifact_is_not_loaded_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            sessions = cache_dir / "sessions"
+            sessions.mkdir(parents=True)
+            artifact = sessions / "abc-deadbeef.jsonl"
+            artifact.write_text(
+                json.dumps(
+                    {
+                        "type": "usage",
+                        "sessionId": "abc",
+                        "modelId": "gemini-3-flash",
+                        "timestamp": 1711200000000,
+                        "input": 5,
+                        "output": 2,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (cache_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "sessions": [
+                            {
+                                "sessionId": "abc",
+                                "artifactPath": "sessions/abc-deadbeef.jsonl",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = jsonl.load_antigravity_usage(cache_dir, 0, None)
+            self.assertEqual(len(loaded["events"]), 1)
 
 
 if __name__ == "__main__":

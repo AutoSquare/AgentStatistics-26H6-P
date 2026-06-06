@@ -14,7 +14,7 @@ export function trendOption(view) {
             series("总量", rows.map((row) => row[1])),
             series("缓存", rows.map((row) => row[2])),
             series("输出", rows.map((row) => row[3])),
-            series("输入", rows.map((row) => row[4])),
+            series("真实输入", rows.map((row) => row[4])),
             series("推理", rows.map((row) => row[5]))
         ]
     };

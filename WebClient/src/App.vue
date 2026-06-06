@@ -49,18 +49,10 @@
             刷新
           </button>
         </div>
-        <div v-else-if="activePage === 'cursor'" class="topbar-actions">
-          <label class="path-field">
-            <span>Cursor cache</span>
-            <input v-model="cursorCacheDraft" type="text" spellcheck="false" title="cursor-cache 目录完整路径" @keyup.enter="saveCursorCachePath" />
-          </label>
+        <div v-else-if="activePage === 'cursor'" class="topbar-actions compact-actions">
           <p class="auth-hint" :class="{ ready: cursorAuthAvailable }">
-            {{ cursorAuthAvailable ? "将自动读取 tokscale 凭证或本机 Cursor 登录缓存（无需保持应用打开）" : "未检测到 Cursor 登录态，请配置 tokscale 凭证或在本机 Cursor 完成一次登录" }}
+            {{ cursorAuthAvailable ? "已连接 Cursor 账号" : "未检测到 Cursor 登录态" }}
           </p>
-          <button class="secondary-button" @click="saveCursorCachePath">
-            <FolderInput :size="17" />
-            保存路径
-          </button>
           <button class="primary-button" :disabled="pageStatus('cursor') === 'scanning'" @click="refreshCursor">
             <RefreshCw :size="17" :class="{ spinning: pageStatus('cursor') === 'scanning' }" />
             刷新
@@ -107,8 +99,8 @@
         :chart-width="chartWidth"
         :active="activePage === 'cursor'"
         empty-title="等待 Cursor 用量数据"
-        empty-description="应用会读取 tokscale / token-monitor 凭证或本机 Cursor 登录缓存并同步云端用量，无需保持 Cursor 应用打开。"
-        risk-caption="来自 Cursor usage-summary API"
+        empty-description="请先确认本机已登录 Cursor，然后点击刷新。"
+        risk-caption="Cursor 额度"
         @update:active-range="cursorRange = $event"
       />
 
@@ -171,7 +163,6 @@ const pageStatuses = ref<Record<AgentSource, StatusKind>>({ codex: "idle", curso
 const pageMessages = ref<Record<AgentSource, string>>({ codex: "等待数据", cursor: "等待数据", antigravity: "等待数据" });
 
 const codexRootDraft = ref("");
-const cursorCacheDraft = ref("");
 const antigravityCacheDraft = ref("");
 const cursorAuthAvailable = ref(false);
 
@@ -212,7 +203,6 @@ onMounted(() => {
   onHostMessage((message) => {
     if (message.type === "settings") {
       if (typeof message.codexRoot === "string") codexRootDraft.value = message.codexRoot;
-      if (typeof message.cursorCachePath === "string") cursorCacheDraft.value = message.cursorCachePath;
       if (typeof message.antigravityCachePath === "string") antigravityCacheDraft.value = message.antigravityCachePath;
       if (typeof message.cursorAuthAvailable === "boolean") cursorAuthAvailable.value = message.cursorAuthAvailable;
     }
@@ -293,10 +283,6 @@ function refreshAntigravity() {
 
 function saveCodexRoot() {
   postToHost({ type: "setCodexRoot", path: codexRootDraft.value });
-}
-
-function saveCursorCachePath() {
-  postToHost({ type: "setCursorCachePath", path: cursorCacheDraft.value });
 }
 
 function saveAntigravityCachePath() {

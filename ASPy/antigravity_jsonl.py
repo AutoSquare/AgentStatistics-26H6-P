@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from antigravity_sync import load_manifest, manifest_path, sessions_dir
+from antigravity_usage_fields import build_antigravity_usage
 from usage_common import cutoff_for_days, load_generic_cache, tail, unix_ms, write_generic_cache
 
 MODEL_ALIAS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -37,17 +38,19 @@ def collect_session_files(cache_dir: Path) -> list[Path]:
         relative = session.get("artifactPath")
         if not isinstance(relative, str) or not relative:
             continue
-        if relative in seen:
-            continue
-        seen.add(relative)
         path = cache_dir / relative
+        key = str(path.resolve())
+        if key in seen:
+            continue
         if path.is_file():
+            seen.add(key)
             files.append(path)
     sessions_root = sessions_dir(cache_dir)
     if sessions_root.is_dir():
         for path in sorted(sessions_root.glob("*.jsonl")):
-            key = str(path)
+            key = str(path.resolve())
             if key not in seen:
+                seen.add(key)
                 files.append(path)
     return files
 
@@ -117,11 +120,11 @@ def parse_jsonl_text(text: str, cutoff_ms: int) -> list[dict[str, Any]]:
         model_id = row.get("modelId")
         model = resolve_model_alias(model_id if isinstance(model_id, str) else (session_model or "unknown"))
         input_tokens = to_safe_int(row.get("input"))
-        output_tokens = to_safe_int(row.get("output"))
+        output_tokens_raw = to_safe_int(row.get("output"))
         cache_read = to_safe_int(row.get("cacheRead"))
         cache_write = to_safe_int(row.get("cacheWrite"))
         reasoning = to_safe_int(row.get("reasoning"))
-        if input_tokens == 0 and output_tokens == 0 and cache_read == 0 and cache_write == 0 and reasoning == 0:
+        if input_tokens == 0 and output_tokens_raw == 0 and cache_read == 0 and cache_write == 0 and reasoning == 0:
             continue
         response_id = row.get("responseId")
         if isinstance(response_id, str) and response_id.strip():
@@ -129,19 +132,13 @@ def parse_jsonl_text(text: str, cutoff_ms: int) -> list[dict[str, Any]]:
             if dedup_key in seen_response_ids:
                 continue
             seen_response_ids.add(dedup_key)
-        total_tokens = input_tokens + output_tokens + reasoning
+            
         events.append(
             {
                 "ts": timestamp,
                 "sid": f"antigravity:{session_id}",
                 "model": model,
-                "usage": {
-                    "input_tokens": input_tokens,
-                    "cached_input_tokens": cache_read + cache_write,
-                    "output_tokens": output_tokens,
-                    "reasoning_output_tokens": reasoning,
-                    "total_tokens": total_tokens,
-                },
+                "usage": build_antigravity_usage(input_tokens, output_tokens_raw, cache_read, cache_write, reasoning),
                 "cost": 0.0,
             }
         )

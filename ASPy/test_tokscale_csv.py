@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import tokscale_csv as csvmod
+from cursor_usage_api import build_usage_json_document, write_usage_json
 
 
 class TokscaleCsvTests(unittest.TestCase):
@@ -45,6 +46,67 @@ class TokscaleCsvTests(unittest.TestCase):
             loaded = csvmod.load_tokscale_usage(cache_dir, "antigravity", 0, None)
             self.assertEqual(len(loaded["events"]), 1)
             self.assertEqual(loaded["events"][0]["model"], "gemini-3-flash")
+
+    def test_cursor_merges_fresh_dashboard_json_with_csv_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            write_usage_json(
+                cache_dir,
+                build_usage_json_document(
+                    [
+                        {
+                            "timestamp": "2026-06-06T08:00:00Z",
+                            "model": "auto",
+                            "tokenUsage": {"inputTokens": 2000, "outputTokens": 200},
+                        },
+                        {
+                            "timestamp": "2026-06-06T09:00:00Z",
+                            "model": "composer-2.5-fast",
+                            "tokenUsage": {"inputTokens": 300, "outputTokens": 30},
+                        }
+                    ],
+                    source="webview-json",
+                ),
+            )
+            cache_dir.joinpath("usage.csv").write_text(
+                "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost\n"
+                "2026-06-05T08:00:00Z,auto,0,1000,0,100,1100,0\n"
+                "2026-06-06T08:00:00Z,auto,0,2000,0,200,2200,0\n",
+                encoding="utf-8",
+            )
+            loaded = csvmod.load_tokscale_usage(cache_dir, "cursor", 0, None)
+        self.assertEqual(len(loaded["events"]), 3)
+        self.assertEqual(sum(item["usage"]["total_tokens"] for item in loaded["events"]), 3630)
+
+    def test_cursor_dedupes_dashboard_json_against_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            write_usage_json(
+                cache_dir,
+                build_usage_json_document(
+                    [
+                        {
+                            "timestamp": "2026-06-05T08:00:00Z",
+                            "model": "auto",
+                            "tokenUsage": {"inputTokens": 10, "outputTokens": 1},
+                        },
+                        {
+                            "timestamp": "2026-06-06T08:00:00Z",
+                            "model": "composer-2.5-fast",
+                            "tokenUsage": {"inputTokens": 200, "outputTokens": 40},
+                        },
+                    ],
+                    source="webview-json",
+                ),
+            )
+            cache_dir.joinpath("usage.csv").write_text(
+                "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost\n"
+                "2026-06-05T08:00:00Z,auto,0,10,0,1,11,0\n",
+                encoding="utf-8",
+            )
+            loaded = csvmod.load_tokscale_usage(cache_dir, "cursor", 0, None)
+        self.assertEqual(len(loaded["events"]), 2)
+        self.assertEqual(sum(item["usage"]["total_tokens"] for item in loaded["events"]), 251)
 
     def test_invalidate_parse_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

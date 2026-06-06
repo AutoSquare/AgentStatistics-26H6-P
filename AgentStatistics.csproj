@@ -63,7 +63,7 @@
   <!-- dual-stack: ASPy -->
   <ItemGroup>
     <None Update="ASPy/**/*.py">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
   </ItemGroup>
 
@@ -85,6 +85,23 @@
   </ItemGroup>
 
 
+  <!-- Cursor tokscale CLI (same engine as token-monitor) -->
+  <ItemGroup>
+    <Content Include="ThirdParty/tokscale/win-x64/tokscale.exe" Condition="Exists('ThirdParty/tokscale/win-x64/tokscale.exe')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>ThirdParty/tokscale/win-x64/tokscale.exe</Link>
+    </Content>
+  </ItemGroup>
+
+
   <!-- dual-stack: persistence-memory -->
+
+  <Target Name="CopyTokscaleBinary" AfterTargets="Build">
+    <Copy
+      SourceFiles="ThirdParty/tokscale/win-x64/tokscale.exe"
+      DestinationFolder="$(OutputPath)ThirdParty/tokscale/win-x64"
+      SkipUnchangedFiles="false"
+      Condition="Exists('ThirdParty/tokscale/win-x64/tokscale.exe')" />
+  </Target>
 
 </Project>

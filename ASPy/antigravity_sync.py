@@ -476,7 +476,10 @@ def cleanup_stale_artifacts(cache_dir: Path, previous: dict[str, Any], next_mani
             target.unlink(missing_ok=True)
 
 
-def sync_antigravity_cache(cache_dir: Path) -> dict[str, Any]:
+def sync_antigravity_cache(
+    cache_dir: Path,
+    connections: list[AntigravityConnection] | None = None,
+) -> dict[str, Any]:
     cache_dir = Path(cache_dir)
     sessions_dir(cache_dir).mkdir(parents=True, exist_ok=True)
     result: dict[str, Any] = {
@@ -488,10 +491,12 @@ def sync_antigravity_cache(cache_dir: Path) -> dict[str, Any]:
         "exportCandidates": 0,
         "error": None,
     }
+    errors: list[str] = []
     try:
         with sync_lock(cache_dir):
             manifest = load_manifest(cache_dir)
-            connections = detect_connections()
+            if connections is None:
+                connections = detect_connections()
             result["connections"] = len(connections)
             if not connections:
                 result["error"] = (
@@ -522,7 +527,11 @@ def sync_antigravity_cache(cache_dir: Path) -> dict[str, Any]:
                 entry = None
                 summary = summary_map.get(candidate.session_id)
                 if summary:
-                    artifact = fetch_session_artifact(summary, connections)
+                    try:
+                        artifact = fetch_session_artifact(summary, connections)
+                    except Exception as exc:  # noqa: BLE001 - one flaky RPC must not drop other sessions
+                        artifact = None
+                        errors.append(f"{summary.session_id}: {exc}")
                     if artifact:
                         path = write_session_artifact(cache_dir, summary.session_id, artifact["contents"])
                         entry = {
@@ -540,7 +549,11 @@ def sync_antigravity_cache(cache_dir: Path) -> dict[str, Any]:
                         step_count=None,
                         connection_fingerprint=connections[0].fingerprint if connections else "",
                     )
-                    artifact = fetch_session_artifact(fallback, connections)
+                    try:
+                        artifact = fetch_session_artifact(fallback, connections)
+                    except Exception as exc:  # noqa: BLE001 - keep already exported artifacts usable
+                        artifact = None
+                        errors.append(f"{candidate.session_id}: {exc}")
                     if artifact:
                         path = write_session_artifact(cache_dir, candidate.session_id, artifact["contents"])
                         entry = {
@@ -572,6 +585,8 @@ def sync_antigravity_cache(cache_dir: Path) -> dict[str, Any]:
             cleanup_stale_artifacts(cache_dir, manifest, next_manifest)
             result["synced"] = True
             result["sessions"] = len(deduped)
+            if errors:
+                result["error"] = "; ".join(errors[:3])
             return result
     except Exception as exc:  # noqa: BLE001 - surface sync failure to UI
         result["error"] = str(exc)

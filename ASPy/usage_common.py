@@ -81,13 +81,22 @@ def pricing_for_model(model: str, pricing_rules: list[dict[str, Any]]) -> dict[s
     return None
 
 
-def price_usage(model: str, usage: dict[str, Any], pricing_rules: list[dict[str, Any]]) -> dict[str, float | int]:
+def price_usage(
+    model: str,
+    usage: dict[str, Any],
+    pricing_rules: list[dict[str, Any]],
+    separate_cache: bool = False,
+) -> dict[str, float | int]:
     input_tokens = max(0, int(usage.get("input_tokens") or 0))
     cached_raw = max(0, int(usage.get("cached_input_tokens") or 0))
     output_tokens = max(0, int(usage.get("output_tokens") or 0))
     reasoning_raw = max(0, int(usage.get("reasoning_output_tokens") or 0))
-    cached_tokens = min(cached_raw, input_tokens) if input_tokens > 0 else cached_raw
-    billable_input = max(0, input_tokens - cached_tokens)
+    if separate_cache:
+        cached_tokens = cached_raw
+        billable_input = input_tokens
+    else:
+        cached_tokens = min(cached_raw, input_tokens) if input_tokens > 0 else cached_raw
+        billable_input = max(0, input_tokens - cached_tokens)
     visible_output = max(0, output_tokens)
     billed_reasoning = max(0, reasoning_raw)
     priced_tokens = billable_input + cached_tokens + visible_output + billed_reasoning
@@ -125,6 +134,7 @@ def build_buckets(
     end: int,
     step: int,
     pricing_rules: list[dict[str, Any]],
+    separate_cache: bool = False,
 ) -> tuple[list[list[Any]], list[list[Any]]]:
     safe_step = max(60_000, int(step))
     bucket_start = math.floor(start / safe_step) * safe_step
@@ -140,7 +150,7 @@ def build_buckets(
         for key in bucket["usage"]:
             bucket["usage"][key] += int(usage.get(key) or 0)
         bucket["calls"] += 1
-        bucket["cost"] += float(price_usage(event.get("model") or "unknown", usage, pricing_rules)["total"])
+        bucket["cost"] += float(price_usage(event.get("model") or "unknown", usage, pricing_rules, separate_cache)["total"])
     trend = [[b["ts"], b["usage"]["total_tokens"], b["usage"]["cached_input_tokens"], b["usage"]["output_tokens"], b["usage"]["input_tokens"], b["usage"]["reasoning_output_tokens"], b["calls"], round(b["cost"], 6)] for b in buckets]
     distribution = [[b["ts"], b["usage"]["total_tokens"], b["calls"], round(b["cost"], 6)] for b in buckets]
     return trend, distribution
@@ -188,6 +198,7 @@ def build_calendar_buckets(
     events: list[dict[str, Any]],
     granularity: str,
     pricing_rules: list[dict[str, Any]],
+    separate_cache: bool = False,
 ) -> tuple[list[list[Any]], list[list[Any]]]:
     buckets: dict[int, dict[str, Any]] = {}
     for event in events:
@@ -200,7 +211,7 @@ def build_calendar_buckets(
         for key in bucket["usage"]:
             bucket["usage"][key] += int(usage.get(key) or 0)
         bucket["calls"] += 1
-        bucket["cost"] += float(price_usage(event.get("model") or "unknown", usage, pricing_rules)["total"])
+        bucket["cost"] += float(price_usage(event.get("model") or "unknown", usage, pricing_rules, separate_cache)["total"])
     rows = [buckets[key] for key in sorted(buckets)]
     trend = [[b["ts"], b["usage"]["total_tokens"], b["usage"]["cached_input_tokens"], b["usage"]["output_tokens"], b["usage"]["input_tokens"], b["usage"]["reasoning_output_tokens"], b["calls"], round(b["cost"], 6)] for b in rows]
     distribution = [[b["ts"], b["usage"]["total_tokens"], b["calls"], round(b["cost"], 6)] for b in rows]
@@ -314,7 +325,9 @@ def build_view(
     session_catalog: dict[str, dict[str, str]],
     pricing_rules: list[dict[str, Any]],
     risk_rows: list[dict[str, Any]] | None = None,
+    cache_hit_mode: str = "input",
 ) -> dict[str, Any]:
+    separate_cache = cache_hit_mode == "input_plus_cached"
     events = in_range(loaded["events"], start, end)
     failures = in_range(loaded["failure_events"], start, end)
     ttfb = in_range(loaded["ttfb_events"], start, end)
@@ -327,7 +340,7 @@ def build_view(
         model = event.get("model") or "unknown"
         for field in totals:
             totals[field] += int(usage.get(field) or 0)
-        cost = price_usage(model, usage, pricing_rules)
+        cost = price_usage(model, usage, pricing_rules, separate_cache)
         for field in ("input", "cached", "output", "reasoning", "total"):
             costs[field] += float(cost[field])
         costs["unpricedTokens"] += int(cost["unpricedTokens"])
@@ -360,17 +373,18 @@ def build_view(
         row["latencyTotal"] += int(event.get("ttfb_ms") or 0)
         row["latencyCount"] += 1
     calls = len(events)
-    cache_hit = (totals["cached_input_tokens"] / totals["input_tokens"] * 100) if totals["input_tokens"] else 0
+    cache_denominator = totals["input_tokens"] + totals["cached_input_tokens"] if cache_hit_mode == "input_plus_cached" else totals["input_tokens"]
+    cache_hit = (totals["cached_input_tokens"] / cache_denominator * 100) if cache_denominator else 0
     success_rate, failure_rate = success_failure_rates(calls, len(failures))
     duration = max(1, end - start)
     if key == "history":
         axis_granularity = choose_history_granularity(start, end, 120)
-        trend, distribution = build_calendar_buckets(events, axis_granularity, pricing_rules)
+        trend, distribution = build_calendar_buckets(events, axis_granularity, pricing_rules, separate_cache)
         trend_step_minutes = None
     else:
         axis_granularity = choose_axis_granularity(duration)
         trend_step = choose_nice_step(duration, 180)
-        trend, distribution = build_buckets(events, start, end, trend_step, pricing_rules)
+        trend, distribution = build_buckets(events, start, end, trend_step, pricing_rules, separate_cache)
         trend_step_minutes = trend_step / 60_000
     peak_total, peak_ts = peak_rate(events)
     sessions = sorted(by_session.values(), key=lambda row: row["tokens"], reverse=True)[:20]
@@ -527,6 +541,7 @@ def build_standard_payload(
     coverage: list[dict[str, str]],
     limits_meta: dict[str, Any] | None = None,
     risk_builder: Callable[[dict[str, Any], float], list[dict[str, Any]]] | None = None,
+    cache_hit_mode: str = "input",
 ) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     if loaded["events"]:
@@ -557,8 +572,10 @@ def build_standard_payload(
         events = in_range(loaded["events"], start, end)
         cache_hit = 0.0
         input_total = sum(int(e["usage"].get("input_tokens") or 0) for e in events)
-        if input_total:
-            cache_hit = sum(int(e["usage"].get("cached_input_tokens") or 0) for e in events) / input_total * 100
+        cached_total = sum(int(e["usage"].get("cached_input_tokens") or 0) for e in events)
+        cache_denominator = input_total + cached_total if cache_hit_mode == "input_plus_cached" else input_total
+        if cache_denominator:
+            cache_hit = cached_total / cache_denominator * 100
         views[key] = build_view(
             key,
             format_range_label(start, end, key),
@@ -568,6 +585,7 @@ def build_standard_payload(
             session_catalog,
             pricing_rules,
             risk_rows=view_risk(loaded, cache_hit),
+            cache_hit_mode=cache_hit_mode,
         )
     history = views["history"]
 

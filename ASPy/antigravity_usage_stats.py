@@ -36,6 +36,17 @@ def default_cache_path() -> Path:
     return base / "AgentStatistics" / "antigravity_usage_cache.json"
 
 
+def default_quota_cache_path() -> Path:
+    appdata = os.getenv("APPDATA")
+    base = Path(appdata) if appdata else Path.home() / ".agentstatistics"
+    return base / "AgentStatistics" / "antigravity_quota_cache.json"
+
+
+def quota_has_pools(quota_probe: dict[str, Any]) -> bool:
+    quota = quota_probe.get("quota")
+    return isinstance(quota, dict) and bool(quota.get("pools"))
+
+
 def resolve_data_status(events: list[dict[str, Any]], sync_result: dict[str, Any] | None, do_sync: bool) -> str:
     if events:
         return "ok"
@@ -57,19 +68,24 @@ def build_payload(
     probe_quota: bool = True,
     do_sync: bool = False,
 ) -> dict[str, Any]:
+    connections = detect_connections()
     sync_result: dict[str, Any] | None = None
     if do_sync:
-        sync_result = sync_antigravity_cache(cache_dir)
+        sync_result = sync_antigravity_cache(cache_dir, connections)
         if sync_result.get("synced"):
             invalidate_parse_cache_entries(cache_path)
 
     cache_loaded = load_antigravity_usage(cache_dir, days, cache_path)
     transcript_loaded = load_antigravity_transcript_usage(days, cache_path)
     loaded = merge_loaded_usage(cache_loaded, transcript_loaded)
-    quota_probe = probe_antigravity_quota() if probe_quota else {"ok": False, "quota": None}
+    quota_cache_path = default_quota_cache_path()
+    quota_probe = (
+        probe_antigravity_quota(connections, quota_cache_path)
+        if probe_quota
+        else {"ok": False, "quota": None}
+    )
     loaded["limits"] = quota_probe
     session_catalog = build_session_catalog(loaded, "antigravity")
-    connections = detect_connections()
 
     def risk_builder(loaded_data: dict[str, Any], cache_hit: float) -> list[dict[str, Any]]:
         return build_antigravity_risk_rows(loaded_data.get("limits"), cache_hit)
@@ -87,14 +103,20 @@ def build_payload(
                 "source": "antigravity-cache JSONL + CLI transcript",
                 "status": "ok" if loaded["events"] else "empty",
             },
-            {"metric": "真实额度", "source": "Antigravity CLI Connect RPC", "status": "ok" if quota_probe.get("ok") else "empty"},
+            {
+                "metric": "真实额度",
+                "source": "Antigravity CLI Connect RPC" if not quota_probe.get("cached") else "本地额度缓存",
+                "status": "ok" if quota_has_pools(quota_probe) else "empty",
+            },
             {"metric": "会话排行", "source": "Antigravity session id", "status": "ok" if session_catalog else "empty"},
             {"metric": "模型排行", "source": "Antigravity model", "status": "ok" if loaded["events"] else "empty"},
         ],
         limits_meta={
             "raw": quota_probe.get("quota") or {},
             "planType": None,
-            "probeError": quota_probe.get("error"),
+            "cached": bool(quota_probe.get("cached")),
+            "cachedAt": quota_probe.get("cachedAt"),
+            "probeError": quota_probe.get("error") or quota_probe.get("probeError"),
             "sync": sync_result,
         },
         risk_builder=risk_builder,
