@@ -752,6 +752,26 @@ public partial class MainWindow : Window
             var recordCount = 0;
             if (root.TryGetProperty("records", out var recordsElement) && recordsElement.ValueKind == JsonValueKind.Array)
                 recordCount = recordsElement.GetArrayLength();
+            if (root.TryGetProperty("accounts", out var accountsElement) && accountsElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var account in accountsElement.EnumerateArray())
+                {
+                    var isCurrent = account.TryGetProperty("isCurrent", out var currentElement)
+                                    && currentElement.ValueKind == JsonValueKind.True;
+                    var syncStatus = account.TryGetProperty("syncStatus", out var accountStatus)
+                        ? accountStatus.GetString()
+                        : null;
+                    if (!isCurrent || string.Equals(syncStatus, "ok", StringComparison.Ordinal))
+                        continue;
+                    if (account.TryGetProperty("syncMessage", out var messageElement)
+                        && messageElement.ValueKind == JsonValueKind.String
+                        && !string.IsNullOrWhiteSpace(messageElement.GetString()))
+                    {
+                        return messageElement.GetString()!;
+                    }
+                    return "Cursor 官网同步不完整，已保留上一次完整用量快照。";
+                }
+            }
             if (string.Equals(dataStatus, "ok", StringComparison.Ordinal) && recordCount > 0)
                 return "已同步 Cursor 用量。";
             if (root.TryGetProperty("sync", out var syncElement) && syncElement.ValueKind == JsonValueKind.Object &&

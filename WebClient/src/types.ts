@@ -75,6 +75,18 @@ export interface AgentSyncResult {
   path?: string;
 }
 
+export interface CursorAccountUsage {
+  id: string;
+  email?: string;
+  label: string;
+  idSuffix: string;
+  isCurrent: boolean;
+  syncStatus: "ok" | "partial" | "error";
+  syncMessage?: string;
+  views: Record<string, AgentView>;
+  records: AgentPayload["records"];
+}
+
 export interface AgentView {
   key: string;
   label: string;
@@ -118,6 +130,8 @@ export interface AgentPayload {
     email?: string;
     path?: string;
   };
+  accounts?: CursorAccountUsage[];
+  activeAccountId?: string;
 }
 
 export type CodexView = AgentView;

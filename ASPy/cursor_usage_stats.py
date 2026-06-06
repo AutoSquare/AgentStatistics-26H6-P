@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
 
 from cursor_auth import normalize_session_token
-from cursor_discover import resolve_session_token
+from cursor_discover import decode_jwt_sub, iter_session_token_candidates, resolve_session_token
 from cursor_limits import build_cursor_risk_rows, default_limits_cache_path, probe_cursor_limits
 from cursor_sync import (
+    derive_account_id,
     ensure_tokscale_credentials,
     sync_cursor_cache,
     tokscale_credentials_path,
@@ -40,10 +43,165 @@ CURSOR_PRICING_RULES = [
 ]
 
 
+def _account_store_dir(cache_dir: Path) -> Path:
+    return cache_dir / "accounts"
+
+
+def _account_folder(cache_dir: Path, account_id: str) -> Path:
+    digest = hashlib.sha256(account_id.encode("utf-8")).hexdigest()[:16]
+    return _account_store_dir(cache_dir) / digest
+
+
+def _read_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _token_subject(token: str | None) -> str:
+    text = str(token or "").strip()
+    if not text:
+        return ""
+    if "%3A%3A" in text:
+        text = text.split("%3A%3A", 1)[1]
+    elif "::" in text:
+        text = text.split("::", 1)[1]
+    return str(decode_jwt_sub(text) or "").strip()
+
+
+def enrich_cursor_identity(resolved: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Fill missing account metadata from equivalent local login candidates."""
+    if not resolved:
+        return None
+    enriched = dict(resolved)
+    if str(enriched.get("email") or "").strip():
+        return enriched
+    subject = _token_subject(str(enriched.get("token") or ""))
+    if not subject:
+        return enriched
+    for candidate in iter_session_token_candidates():
+        if _token_subject(str(candidate.get("token") or "")) != subject:
+            continue
+        email = str(candidate.get("email") or "").strip()
+        if email:
+            enriched["email"] = email
+            enriched["emailSource"] = candidate.get("source")
+            break
+    return enriched
+
+
+def archive_current_account_sources(
+    cache_dir: Path,
+    account_id: str,
+    email: str | None,
+) -> None:
+    """Persist the current root snapshot under its Cursor account."""
+    usage_path = cache_dir / "usage.json"
+    usage_document = _read_json_object(usage_path)
+    stored_account = str((usage_document or {}).get("accountId") or "").strip()
+    effective_account = stored_account or account_id
+    if not effective_account:
+        return
+
+    account_dir = _account_folder(cache_dir, effective_account)
+    account_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = account_dir / "account.json"
+    existing = _read_json_object(metadata_path) or {}
+    metadata = {
+        "version": 1,
+        "accountId": effective_account,
+        "email": (
+            (usage_document or {}).get("email")
+            or (email if effective_account == account_id else None)
+            or existing.get("email")
+        ),
+    }
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    if usage_document and usage_path.is_file():
+        shutil.copy2(usage_path, account_dir / "usage.json")
+
+    legacy_csv = cache_dir / "usage.csv"
+    account_csv = account_dir / "usage.csv"
+    has_other_accounts = any(
+        path.is_file()
+        for path in _account_store_dir(cache_dir).glob("*/account.json")
+        if path != metadata_path
+    )
+    if legacy_csv.is_file() and (account_csv.is_file() or not has_other_accounts):
+        shutil.copy2(legacy_csv, account_csv)
+
+
+def load_cursor_accounts(
+    cache_dir: Path,
+    days: int,
+    cache_path: Path | None,
+) -> list[dict[str, Any]]:
+    accounts: list[dict[str, Any]] = []
+    store = _account_store_dir(cache_dir)
+    if not store.is_dir():
+        return accounts
+    for metadata_path in sorted(store.glob("*/account.json")):
+        metadata = _read_json_object(metadata_path)
+        if not metadata:
+            continue
+        account_id = str(metadata.get("accountId") or "").strip()
+        if not account_id:
+            continue
+        account_dir = metadata_path.parent
+        loaded = load_tokscale_usage(account_dir, "cursor", days, cache_path)
+        if not loaded.get("events"):
+            continue
+        accounts.append(
+            {
+                "id": account_id,
+                "email": metadata.get("email"),
+                "root": account_dir,
+                "loaded": loaded,
+            }
+        )
+    return accounts
+
+
+def combine_cursor_accounts(accounts: list[dict[str, Any]]) -> dict[str, Any]:
+    combined = {
+        "sessions": [],
+        "events": [],
+        "ttfb_events": [],
+        "failure_events": [],
+        "limits": None,
+    }
+    for account in accounts:
+        account_id = str(account["id"])
+        loaded = account["loaded"]
+        for event in loaded.get("events") or []:
+            clone = dict(event)
+            clone["account_id"] = account_id
+            clone["sid"] = f"{account_id}:{event.get('sid') or 'unknown'}"
+            combined["events"].append(clone)
+        for session in loaded.get("sessions") or []:
+            clone = dict(session)
+            clone["sid"] = f"{account_id}:{session.get('sid') or 'unknown'}"
+            combined["sessions"].append(clone)
+    combined["events"].sort(key=lambda item: int(item.get("ts") or 0))
+    return combined
+
+
 def default_cache_path() -> Path:
     appdata = os.getenv("APPDATA")
     base = Path(appdata) if appdata else Path.home() / ".agentstatistics"
     return base / "AgentStatistics" / "cursor_usage_cache.json"
+
+
+def default_sync_status_path() -> Path:
+    appdata = os.getenv("APPDATA")
+    base = Path(appdata) if appdata else Path.home() / ".agentstatistics"
+    return base / "AgentStatistics" / "cursor_usage_sync_status.json"
 
 
 def resolve_data_status(events: list[dict[str, Any]], sync_result: dict[str, Any] | None, do_sync: bool) -> str:
@@ -69,6 +227,9 @@ def build_payload(
     skip_cloud: bool = False,
 ) -> dict[str, Any]:
     normalized_token = normalize_session_token(session_token) if session_token else None
+    resolved = enrich_cursor_identity(
+        resolve_session_token() if not normalized_token else {"token": normalized_token, "source": "argument"}
+    )
     sync_result: dict[str, Any] | None = None
     if do_sync:
         ensure_tokscale_credentials(normalized_token)
@@ -95,9 +256,14 @@ def build_payload(
                 except ValueError:
                     pass
 
-    loaded = load_tokscale_usage(cache_dir, "cursor", days, cache_path)
-    resolved = resolve_session_token() if not normalized_token else {"token": normalized_token, "source": "argument"}
     token = resolved.get("token") if resolved else None
+    account_id = derive_account_id(str(token)) if token else ""
+    account_email = str(resolved.get("email") or "").strip() if resolved else ""
+    if account_id:
+        archive_current_account_sources(cache_dir, account_id, account_email or None)
+    accounts = load_cursor_accounts(cache_dir, days, cache_path)
+    loaded = combine_cursor_accounts(accounts) if accounts else load_tokscale_usage(cache_dir, "cursor", days, cache_path)
+
     limits_cache_path = default_limits_cache_path()
     limits_probe = probe_cursor_limits(
         token,
@@ -144,6 +310,44 @@ def build_payload(
         },
         risk_builder=risk_builder,
     )
+    account_payloads: list[dict[str, Any]] = []
+    sync_status = _read_json_object(default_sync_status_path()) or {}
+    for account in accounts:
+        account_loaded = account["loaded"]
+        account_loaded["limits"] = limits_probe if account["id"] == account_id else None
+        account_catalog = build_session_catalog(account_loaded, "cursor")
+        account_payload = build_standard_payload(
+            "cursor",
+            account["root"],
+            days,
+            account_loaded,
+            account_catalog,
+            CURSOR_PRICING_RULES,
+            [],
+            risk_builder=risk_builder,
+        )
+        identity = str(account["id"])
+        email = str(account.get("email") or "").strip()
+        account_sync_status = (
+            str(sync_status.get("status") or "ok")
+            if str(sync_status.get("accountId") or "") == identity
+            else "ok"
+        )
+        account_payloads.append(
+            {
+                "id": identity,
+                "email": email or None,
+                "label": email or f"Cursor 账号 · {identity[-8:]}",
+                "idSuffix": identity[-8:],
+                "isCurrent": identity == account_id,
+                "syncStatus": account_sync_status if account_sync_status in {"ok", "partial", "error"} else "error",
+                "syncMessage": sync_status.get("message") if account_sync_status != "ok" else None,
+                "views": account_payload["views"],
+                "records": account_payload["records"],
+            }
+        )
+    payload["accounts"] = account_payloads
+    payload["activeAccountId"] = account_id or None
     payload["syncAttempted"] = do_sync
     if sync_result is not None:
         payload["sync"] = sync_result

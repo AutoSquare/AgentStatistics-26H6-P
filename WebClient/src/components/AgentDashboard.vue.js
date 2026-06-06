@@ -2,7 +2,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import * as echarts from "echarts";
 import { Database, Download, TriangleAlert } from "@lucide/vue";
 import { costOption, distributionOption, trendOption } from "../charts";
-import { buildEmptyDescription, hasUsageRecords } from "../payloadStatus";
+import { buildEmptyDescription } from "../payloadStatus";
 const props = defineProps();
 const __VLS_emit = defineEmits();
 const ranges = [
@@ -15,12 +15,16 @@ const ranges = [
 const trendChart = ref(null);
 const distributionChart = ref(null);
 const costChart = ref(null);
+const selectedAccountId = ref("all");
 let trendInstance = null;
 let distributionInstance = null;
 let costInstance = null;
 let resizeObserver = null;
 let resizeFrame = 0;
-const hasUsageData = computed(() => hasUsageRecords(props.payload));
+const accountOptions = computed(() => props.payload?.accounts ?? []);
+const selectedAccount = computed(() => accountOptions.value.find((item) => item.id === selectedAccountId.value) ?? null);
+const effectiveRecords = computed(() => selectedAccount.value?.records ?? props.payload?.records ?? []);
+const hasUsageData = computed(() => effectiveRecords.value.length > 0);
 const showEmptyPanel = computed(() => props.statusKind !== "error" && (!props.payload || !hasUsageData.value));
 const resolvedEmptyDescription = computed(() => {
     if (!props.payload)
@@ -34,7 +38,11 @@ const syncMetaLabel = computed(() => {
         return `${props.payload.generatedAt} 已同步`;
     return `${props.payload.generatedAt} 扫描完成（无用量）`;
 });
-const currentView = computed(() => props.payload?.views?.[props.activeRange] ?? props.payload?.views?.history ?? null);
+const allAccountsView = computed(() => props.payload?.views?.[props.activeRange] ?? props.payload?.views?.history ?? null);
+const currentView = computed(() => {
+    const views = selectedAccount.value?.views ?? props.payload?.views;
+    return views?.[props.activeRange] ?? views?.history ?? null;
+});
 const chartView = computed(() => {
     if (!currentView.value)
         return null;
@@ -42,7 +50,7 @@ const chartView = computed(() => {
         return currentView.value;
     return {
         ...currentView.value,
-        ...buildHistoryCharts(props.payload.records, currentView.value.range.start, currentView.value.range.end, props.chartWidth)
+        ...buildHistoryCharts(effectiveRecords.value, currentView.value.range.start, currentView.value.range.end, props.chartWidth)
     };
 });
 onBeforeUnmount(() => {
@@ -82,6 +90,11 @@ function tryRenderCharts() {
 }
 watch(chartView, tryRenderCharts, { immediate: true });
 watch(() => props.active, tryRenderCharts, { immediate: true });
+watch(() => props.payload?.activeAccountId, () => {
+    if (selectedAccountId.value !== "all" && !accountOptions.value.some((item) => item.id === selectedAccountId.value)) {
+        selectedAccountId.value = "all";
+    }
+});
 watch(() => props.chartWidth, () => {
     if (props.active)
         scheduleChartResize();
@@ -115,7 +128,7 @@ function scheduleChartResize() {
 function exportCsv() {
     if (!props.payload || !currentView.value)
         return;
-    const rows = props.payload.records.filter((row) => row[0] >= currentView.value.range.start && row[0] <= currentView.value.range.end);
+    const rows = effectiveRecords.value.filter((row) => row[0] >= currentView.value.range.start && row[0] <= currentView.value.range.end);
     const headers = ["Date", "Cloud Agent ID", "Automation ID", "Kind", "Model", "Max Mode", "Input (w/ Cache Write)", "Input (w/o Cache Write)", "Cache Read", "Output Tokens", "Total Tokens", "Cost"];
     const body = rows.map((row) => {
         const input = row[3] || 0;
@@ -128,7 +141,8 @@ function exportCsv() {
     const blob = new Blob([[headers.join(","), ...body].join("\r\n")], { type: "text/csv;charset=utf-8" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = `${props.payload.source}-usage-events-${currentView.value.key}.csv`;
+    const accountSuffix = selectedAccount.value ? `-${selectedAccount.value.idSuffix}` : "";
+    link.download = `${props.payload.source}-usage-events${accountSuffix}-${currentView.value.key}.csv`;
     link.click();
     URL.revokeObjectURL(link.href);
 }
@@ -260,6 +274,58 @@ const __VLS_1 = __VLS_asFunctionalComponent(__VLS_0, new __VLS_0({
 const __VLS_2 = __VLS_1({
     size: (16),
 }, ...__VLS_functionalComponentArgsRest(__VLS_1));
+if (__VLS_ctx.accountOptions.length) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
+        ...{ class: "account-section" },
+        'aria-label': "Cursor 账号用量",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (...[$event]) => {
+                if (!(__VLS_ctx.accountOptions.length))
+                    return;
+                __VLS_ctx.selectedAccountId = 'all';
+            } },
+        ...{ class: "account-card" },
+        ...{ class: ({ active: __VLS_ctx.selectedAccountId === 'all' }) },
+        type: "button",
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+        ...{ class: "account-name" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+    (__VLS_ctx.allAccountsView?.summary.totalTokensLabel ?? "0");
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+    (__VLS_ctx.allAccountsView?.summary.requestsLabel ?? "0");
+    ((__VLS_ctx.allAccountsView?.cost.total ?? 0).toFixed(2));
+    for (const [account] of __VLS_getVForSourceType((__VLS_ctx.accountOptions))) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+            ...{ onClick: (...[$event]) => {
+                    if (!(__VLS_ctx.accountOptions.length))
+                        return;
+                    __VLS_ctx.selectedAccountId = account.id;
+                } },
+            key: (account.id),
+            ...{ class: "account-card" },
+            ...{ class: ({ active: __VLS_ctx.selectedAccountId === account.id }) },
+            type: "button",
+        });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "account-name" },
+        });
+        (account.label);
+        if (account.isCurrent) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        }
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+        (account.views[__VLS_ctx.activeRange]?.summary.totalTokensLabel ?? "0");
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
+        (account.idSuffix);
+        (account.views[__VLS_ctx.activeRange]?.summary.requestsLabel ?? "0");
+        if (account.syncStatus !== 'ok') {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.em, __VLS_intrinsicElements.em)({});
+        }
+    }
+}
 if (__VLS_ctx.showEmptyPanel) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "empty-panel" },
@@ -501,6 +567,11 @@ else if (__VLS_ctx.currentView && __VLS_ctx.hasUsageData) {
 /** @type {__VLS_StyleScopedClasses['range-tabs']} */ ;
 /** @type {__VLS_StyleScopedClasses['sync-meta']} */ ;
 /** @type {__VLS_StyleScopedClasses['text-button']} */ ;
+/** @type {__VLS_StyleScopedClasses['account-section']} */ ;
+/** @type {__VLS_StyleScopedClasses['account-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['account-name']} */ ;
+/** @type {__VLS_StyleScopedClasses['account-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['account-name']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['error']} */ ;
@@ -560,10 +631,13 @@ const __VLS_self = (await import('vue')).defineComponent({
             trendChart: trendChart,
             distributionChart: distributionChart,
             costChart: costChart,
+            selectedAccountId: selectedAccountId,
+            accountOptions: accountOptions,
             hasUsageData: hasUsageData,
             showEmptyPanel: showEmptyPanel,
             resolvedEmptyDescription: resolvedEmptyDescription,
             syncMetaLabel: syncMetaLabel,
+            allAccountsView: allAccountsView,
             currentView: currentView,
             exportCsv: exportCsv,
         };

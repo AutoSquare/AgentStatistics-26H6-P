@@ -33,8 +33,10 @@ class CursorUsageApiTests(unittest.TestCase):
         self.assertIsNotNone(event)
         assert event is not None
         self.assertEqual(event["model"], "claude-sonnet-4")
-        self.assertEqual(event["usage"]["input_tokens"], 100)
+        self.assertEqual(event["usage"]["input_tokens"], 115)
+        self.assertEqual(event["usage"]["cached_input_tokens"], 15)
         self.assertEqual(event["usage"]["output_tokens"], 40)
+        self.assertEqual(event["usage"]["total_tokens"], 155)
         self.assertEqual(event["cost"], 0.21)
         self.assertIn("sess-1", event["sid"])
 

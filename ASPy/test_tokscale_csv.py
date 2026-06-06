@@ -108,6 +108,60 @@ class TokscaleCsvTests(unittest.TestCase):
         self.assertEqual(len(loaded["events"]), 2)
         self.assertEqual(sum(item["usage"]["total_tokens"] for item in loaded["events"]), 251)
 
+    def test_cursor_prefers_official_json_for_matching_nonzero_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            write_usage_json(
+                cache_dir,
+                build_usage_json_document(
+                    [
+                        {
+                            "timestamp": "2026-06-06T08:00:00Z",
+                            "model": "auto",
+                            "tokenUsage": {
+                                "inputTokens": 100,
+                                "cacheReadTokens": 900,
+                                "outputTokens": 20,
+                            },
+                        }
+                    ],
+                    source="webview-json",
+                ),
+            )
+            cache_dir.joinpath("usage.csv").write_text(
+                "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost\n"
+                "2026-06-06T08:00:00Z,auto,0,90,800,10,900,0\n",
+                encoding="utf-8",
+            )
+            loaded = csvmod.load_tokscale_usage(cache_dir, "cursor", 0, None)
+        self.assertEqual(len(loaded["events"]), 1)
+        self.assertEqual(loaded["events"][0]["usage"]["total_tokens"], 1020)
+
+    def test_cursor_keeps_local_nonzero_event_when_official_event_is_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            write_usage_json(
+                cache_dir,
+                build_usage_json_document(
+                    [
+                        {
+                            "timestamp": "2026-06-06T08:00:00Z",
+                            "model": "auto",
+                            "tokenUsage": {},
+                        }
+                    ],
+                    source="webview-json",
+                ),
+            )
+            cache_dir.joinpath("usage.csv").write_text(
+                "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost\n"
+                "2026-06-06T08:00:00Z,auto,0,90,800,10,900,0\n",
+                encoding="utf-8",
+            )
+            loaded = csvmod.load_tokscale_usage(cache_dir, "cursor", 0, None)
+        self.assertEqual(len(loaded["events"]), 1)
+        self.assertEqual(loaded["events"][0]["usage"]["total_tokens"], 900)
+
     def test_invalidate_parse_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp)

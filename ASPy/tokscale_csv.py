@@ -290,18 +290,18 @@ def load_tokscale_usage(cache_dir: Path, client: str, days: int, cache_path: Pat
 
 
 def merge_cursor_usage_sources(json_loaded: dict[str, Any], csv_loaded: dict[str, Any], client: str) -> dict[str, Any]:
-    """Merge Cursor Dashboard JSON with exported CSV history, deduping matching events."""
+    """Merge one Cursor account, preferring official JSON for matching events."""
     json_events = json_loaded.get("events") if isinstance(json_loaded.get("events"), list) else []
     csv_events = csv_loaded.get("events") if isinstance(csv_loaded.get("events"), list) else []
-    merged_events: list[dict[str, Any]] = []
-    seen: set[tuple[Any, ...]] = set()
-
-    for event in [*csv_events, *json_events]:
-        key = cursor_event_identity(event)
-        if key in seen:
-            continue
-        seen.add(key)
-        merged_events.append(event)
+    merged_by_key: dict[tuple[Any, ...], dict[str, Any]] = {
+        cursor_event_match_key(event): event for event in csv_events
+    }
+    for event in json_events:
+        key = cursor_event_match_key(event)
+        local = merged_by_key.get(key)
+        if total_tokens_for_event(event) > 0 or local is None or total_tokens_for_event(local) <= 0:
+            merged_by_key[key] = event
+    merged_events = list(merged_by_key.values())
     merged_events.sort(key=lambda item: int(item.get("ts") or 0))
 
     merged = {
@@ -332,6 +332,18 @@ def cursor_event_identity(event: dict[str, Any]) -> tuple[Any, ...]:
         int(usage.get("output_tokens") or 0),
         int(usage.get("total_tokens") or 0),
     )
+
+
+def cursor_event_match_key(event: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        int(event.get("ts") or 0),
+        normalize_model_name(str(event.get("model") or "unknown"), "cursor"),
+    )
+
+
+def total_tokens_for_event(event: dict[str, Any]) -> int:
+    usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+    return int(usage.get("total_tokens") or 0)
 
 
 def build_session_catalog_from_events(

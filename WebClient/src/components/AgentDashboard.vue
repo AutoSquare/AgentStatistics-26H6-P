@@ -15,6 +15,37 @@
       </div>
     </div>
 
+    <section v-if="accountOptions.length" class="account-section" aria-label="Cursor 账号用量">
+      <button
+        class="account-card"
+        :class="{ active: selectedAccountId === 'all' }"
+        type="button"
+        @click="selectedAccountId = 'all'"
+      >
+        <span class="account-name">全部账号</span>
+        <strong>{{ allAccountsView?.summary.totalTokensLabel ?? "0" }}</strong>
+        <small>{{ allAccountsView?.summary.requestsLabel ?? "0" }} 次调用 · ${{ (allAccountsView?.cost.total ?? 0).toFixed(2) }}</small>
+      </button>
+      <button
+        v-for="account in accountOptions"
+        :key="account.id"
+        class="account-card"
+        :class="{ active: selectedAccountId === account.id }"
+        type="button"
+        @click="selectedAccountId = account.id"
+      >
+        <span class="account-name">
+          {{ account.label }}
+          <b v-if="account.isCurrent">当前</b>
+        </span>
+        <strong>{{ account.views[activeRange]?.summary.totalTokensLabel ?? "0" }}</strong>
+        <small>
+          ID …{{ account.idSuffix }} · {{ account.views[activeRange]?.summary.requestsLabel ?? "0" }} 次调用
+          <em v-if="account.syncStatus !== 'ok'">同步异常</em>
+        </small>
+      </button>
+    </section>
+
     <div v-if="showEmptyPanel" class="empty-panel">
       <Database :size="34" />
       <h2>{{ emptyTitle }}</h2>
@@ -150,8 +181,8 @@ import * as echarts from "echarts";
 import { Database, Download, TriangleAlert } from "@lucide/vue";
 import { costOption, distributionOption, trendOption } from "../charts";
 import type { ChartView, TimeGranularity } from "../charts";
-import { buildEmptyDescription, hasUsageRecords } from "../payloadStatus";
-import type { AgentPayload, AgentView, StatusKind } from "../types";
+import { buildEmptyDescription } from "../payloadStatus";
+import type { AgentPayload, AgentView, CursorAccountUsage, StatusKind } from "../types";
 
 const props = defineProps<{
   payload: AgentPayload | null;
@@ -180,13 +211,17 @@ const ranges = [
 const trendChart = ref<HTMLElement | null>(null);
 const distributionChart = ref<HTMLElement | null>(null);
 const costChart = ref<HTMLElement | null>(null);
+const selectedAccountId = ref("all");
 let trendInstance: echarts.ECharts | null = null;
 let distributionInstance: echarts.ECharts | null = null;
 let costInstance: echarts.ECharts | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let resizeFrame = 0;
 
-const hasUsageData = computed(() => hasUsageRecords(props.payload));
+const accountOptions = computed<CursorAccountUsage[]>(() => props.payload?.accounts ?? []);
+const selectedAccount = computed(() => accountOptions.value.find((item) => item.id === selectedAccountId.value) ?? null);
+const effectiveRecords = computed(() => selectedAccount.value?.records ?? props.payload?.records ?? []);
+const hasUsageData = computed(() => effectiveRecords.value.length > 0);
 const showEmptyPanel = computed(() => props.statusKind !== "error" && (!props.payload || !hasUsageData.value));
 const resolvedEmptyDescription = computed(() => {
   if (!props.payload) return props.emptyDescription;
@@ -198,13 +233,17 @@ const syncMetaLabel = computed(() => {
   return `${props.payload.generatedAt} 扫描完成（无用量）`;
 });
 
-const currentView = computed<AgentView | null>(() => props.payload?.views?.[props.activeRange] ?? props.payload?.views?.history ?? null);
+const allAccountsView = computed<AgentView | null>(() => props.payload?.views?.[props.activeRange] ?? props.payload?.views?.history ?? null);
+const currentView = computed<AgentView | null>(() => {
+  const views = selectedAccount.value?.views ?? props.payload?.views;
+  return views?.[props.activeRange] ?? views?.history ?? null;
+});
 const chartView = computed<ChartView | null>(() => {
   if (!currentView.value) return null;
   if (props.activeRange !== "history" || !props.payload) return currentView.value;
   return {
     ...currentView.value,
-    ...buildHistoryCharts(props.payload.records, currentView.value.range.start, currentView.value.range.end, props.chartWidth)
+    ...buildHistoryCharts(effectiveRecords.value, currentView.value.range.start, currentView.value.range.end, props.chartWidth)
   };
 });
 
@@ -247,6 +286,15 @@ watch(chartView, tryRenderCharts, { immediate: true });
 watch(() => props.active, tryRenderCharts, { immediate: true });
 
 watch(
+  () => props.payload?.activeAccountId,
+  () => {
+    if (selectedAccountId.value !== "all" && !accountOptions.value.some((item) => item.id === selectedAccountId.value)) {
+      selectedAccountId.value = "all";
+    }
+  }
+);
+
+watch(
   () => props.chartWidth,
   () => {
     if (props.active) scheduleChartResize();
@@ -280,7 +328,7 @@ function scheduleChartResize() {
 
 function exportCsv() {
   if (!props.payload || !currentView.value) return;
-  const rows = props.payload.records.filter((row) => row[0] >= currentView.value!.range.start && row[0] <= currentView.value!.range.end);
+  const rows = effectiveRecords.value.filter((row) => row[0] >= currentView.value!.range.start && row[0] <= currentView.value!.range.end);
   const headers = ["Date", "Cloud Agent ID", "Automation ID", "Kind", "Model", "Max Mode", "Input (w/ Cache Write)", "Input (w/o Cache Write)", "Cache Read", "Output Tokens", "Total Tokens", "Cost"];
   const body = rows.map((row) => {
     const input = row[3] || 0;
@@ -293,7 +341,8 @@ function exportCsv() {
   const blob = new Blob([[headers.join(","), ...body].join("\r\n")], { type: "text/csv;charset=utf-8" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
-  link.download = `${props.payload.source}-usage-events-${currentView.value.key}.csv`;
+  const accountSuffix = selectedAccount.value ? `-${selectedAccount.value.idSuffix}` : "";
+  link.download = `${props.payload.source}-usage-events${accountSuffix}-${currentView.value.key}.csv`;
   link.click();
   URL.revokeObjectURL(link.href);
 }

@@ -192,12 +192,23 @@ public sealed class CursorDashboardBootstrapResult
                 var source = item.TryGetProperty("source", out var sourceValue) && sourceValue.ValueKind == JsonValueKind.String
                     ? sourceValue.GetString()
                     : null;
-                candidates.Add(new CursorDashboardTokenCandidate(value, source));
+                var email = item.TryGetProperty("email", out var emailValue) && emailValue.ValueKind == JsonValueKind.String
+                    ? emailValue.GetString()
+                    : null;
+                candidates.Add(new CursorDashboardTokenCandidate(
+                    value,
+                    source,
+                    CursorTokenNormalizer.DeriveAccountId(value),
+                    email));
             }
         }
 
         if (candidates.Count == 0 && !string.IsNullOrWhiteSpace(primary))
-            candidates.Add(new CursorDashboardTokenCandidate(primary, "primary"));
+            candidates.Add(new CursorDashboardTokenCandidate(
+                primary,
+                "primary",
+                CursorTokenNormalizer.DeriveAccountId(primary),
+                null));
 
         return new CursorDashboardBootstrapResult(candidates, launched, primary ?? candidates.FirstOrDefault()?.Token);
     }
@@ -208,4 +219,10 @@ public sealed class CursorDashboardBootstrapResult
 /// </summary>
 /// <param name="Token">规范化 Token。</param>
 /// <param name="Source">来源标识。</param>
-public sealed record CursorDashboardTokenCandidate(string Token, string? Source);
+/// <param name="AccountId">稳定账号标识。</param>
+/// <param name="Email">账号邮箱；不可用时为空。</param>
+public sealed record CursorDashboardTokenCandidate(
+    string Token,
+    string? Source,
+    string AccountId,
+    string? Email);

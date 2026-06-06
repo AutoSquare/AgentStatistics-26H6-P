@@ -9,7 +9,7 @@ AgentStatistics 是一个面向 Windows 桌面的本地 AI Agent 用量统计工
 | 能力 | 说明 |
 | --- | --- |
 | Codex 用量监测 | 扫描本机 Codex sessions JSONL 日志，聚合请求数、模型、Token 类型与时间范围视图。 |
-| Cursor 用量监测 | 解析官网 Dashboard 导出的 `usage.json` / tokscale `cursor-cache` CSV，通过隐藏 WebView2 复用登录态同步用量与 usage-summary 额度，不在刷新时自动打开新网页。 |
+| Cursor 用量监测 | 解析官网 Dashboard 导出的 `usage.json` / tokscale `cursor-cache` CSV，通过隐藏 WebView2 复用登录态同步用量与 usage-summary 额度；按账号隔离历史、合并官网与本地记录，并支持全部账号或单账号查看。 |
 | Antigravity 用量监测 | 读取 `antigravity-cache/sessions/*.jsonl` 与 `~/.gemini/antigravity-cli` transcript；刷新时从运行中 CLI（agy）经 Connect RPC 同步；可选配额风险面板。 |
 | 趋势可视化 | 使用 Vue、Vite 和 ECharts 展示 Token 趋势、调用分布、费用结构和风险状态。 |
 | 本地路径配置 | 支持在界面中配置 Codex sessions 路径，并通过 WPF 监听日志变化触发刷新。 |
@@ -77,6 +77,8 @@ dotnet run
 - 会话 / 项目排行、模型排行；
 - 当前范围 CSV 导出。
 
+Cursor 页使用相同的时间范围和统计视图，并在时间范围下方显示账号卡片。不同账号的用量相加形成“全部账号”总计；选择单个账号后，KPI、趋势、排行和 CSV 导出均切换到该账号。
+
 ## 项目结构
 
 ```text
@@ -101,6 +103,7 @@ AgentStatistics/
 - Codex 统计只提取 Token 数、模型名、时间戳、会话标识、cwd basename、rate limit、耗时和失败状态等元数据。
 - 本项目不读取、不展示、不导出提示词、助手正文、工具输出和文件内容。
 - 本地业务数据默认写入 `%AppData%\AgentStatistics\`，包括 `session_snapshot.json`、`user_settings.json` 和 Codex 用量缓存。
+- Cursor 官网完整快照按账号归档到 `cursor-cache/accounts/<account-hash>/`。旧版无账号 `usage.csv` 首次迁移时归入当前登录账号；官网分页未拉全时保留上一次完整快照。
 - 费用展示为基于本地规则的估算结果，不等同于服务商官方账单。
 
 ## 品牌与资源

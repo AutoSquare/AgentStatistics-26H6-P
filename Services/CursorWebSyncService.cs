@@ -27,6 +27,7 @@ public sealed class CursorWebSyncService
     private const string UsageEventsApiUrl = "https://cursor.com/api/dashboard/get-filtered-usage-events";
     private const string UsageSummaryApiUrl = "https://cursor.com/api/usage-summary";
     private const string WebUsageSummaryFileName = "cursor_web_usage_summary.json";
+    private const string UsageSyncStatusFileName = "cursor_usage_sync_status.json";
     private const string UsageJsonFileName = "usage.json";
     private const int DefaultPageSize = 100;
     private const int MaxPages = 200;
@@ -61,6 +62,8 @@ public sealed class CursorWebSyncService
                         webView,
                         null,
                         "webview-session",
+                        null,
+                        null,
                         cancellationToken)
                     .ConfigureAwait(true);
             }
@@ -74,6 +77,8 @@ public sealed class CursorWebSyncService
                         webView,
                         candidate.Token,
                         candidate.Source,
+                        candidate.AccountId,
+                        candidate.Email,
                         cancellationToken)
                     .ConfigureAwait(true);
                 if (ok)
@@ -145,16 +150,20 @@ public sealed class CursorWebSyncService
     {
         var results = new List<CursorDashboardTokenCandidate>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        void Add(string? token, string? source)
+        void Add(string? token, string? source, string? accountId = null, string? email = null)
         {
             var normalized = CursorTokenNormalizer.Normalize(token);
             if (string.IsNullOrWhiteSpace(normalized) || !seen.Add(normalized))
                 return;
-            results.Add(new CursorDashboardTokenCandidate(normalized, source));
+            results.Add(new CursorDashboardTokenCandidate(
+                normalized,
+                source,
+                accountId ?? CursorTokenNormalizer.DeriveAccountId(normalized),
+                email));
         }
 
         foreach (var candidate in bootstrap.Candidates)
-            Add(candidate.Token, candidate.Source);
+            Add(candidate.Token, candidate.Source, candidate.AccountId, candidate.Email);
         Add(bootstrap.PrimaryToken, "bootstrap-primary");
         Add(fallbackToken, "resolver-fallback");
         return results;
@@ -166,6 +175,8 @@ public sealed class CursorWebSyncService
         CoreWebView2 webView,
         string? token,
         string? source,
+        string? accountId,
+        string? email,
         CancellationToken cancellationToken)
     {
         CursorWebSyncLog.Write($"dashboard sync try source={source ?? "unknown"}");
@@ -193,11 +204,46 @@ public sealed class CursorWebSyncService
         }
 
         var usageOk = false;
-        if (events.Count > 0)
+        var expectedCount = capture.TotalUsageEventsCount;
+        var usageComplete = events.Count > 0
+                            && (expectedCount is null || events.Count >= expectedCount.Value);
+        if (usageComplete)
         {
-            await WriteUsageJsonAsync(cacheDir, events, cancellationToken).ConfigureAwait(true);
+            accountId ??= !string.IsNullOrWhiteSpace(token)
+                ? CursorTokenNormalizer.DeriveAccountId(token)
+                : ExtractOwningUser(events);
+            await WriteUsageJsonAsync(
+                cacheDir,
+                events,
+                accountId,
+                email,
+                cancellationToken).ConfigureAwait(true);
+            await WriteUsageSyncStatusAsync(
+                appDataDir,
+                accountId,
+                "ok",
+                events.Count,
+                expectedCount,
+                null,
+                cancellationToken).ConfigureAwait(true);
             CursorWebSyncLog.Write($"usage-json ok events={events.Count} source={capture.LastNote ?? source ?? "same-origin-fetch"}");
             usageOk = true;
+        }
+        else if (events.Count > 0)
+        {
+            var rejectedAccountId = accountId ?? (!string.IsNullOrWhiteSpace(token)
+                ? CursorTokenNormalizer.DeriveAccountId(token)
+                : ExtractOwningUser(events));
+            await WriteUsageSyncStatusAsync(
+                appDataDir,
+                rejectedAccountId,
+                "partial",
+                events.Count,
+                expectedCount,
+                "官网分页结果不完整，已保留上一次完整用量快照。",
+                cancellationToken).ConfigureAwait(true);
+            CursorWebSyncLog.Write(
+                $"usage sync rejected partial events={events.Count} total={expectedCount?.ToString() ?? "?"}; keeping previous complete snapshot");
         }
         else
         {
@@ -456,10 +502,11 @@ public sealed class CursorWebSyncService
         CursorDashboardCapture capture,
         CancellationToken cancellationToken)
     {
-        var allEvents = new List<JsonElement>();
+        var allEvents = capture.Events.ToList();
         int? totalCount = capture.TotalUsageEventsCount;
-        var hasMore = true;
-        for (var page = 1; page <= MaxPages && hasMore; page++)
+        var hasMore = allEvents.Count > 0;
+        var firstPage = allEvents.Count > 0 ? 2 : 1;
+        for (var page = firstPage; page <= MaxPages && hasMore; page++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var pageJson = await FetchUsagePageScriptAsync(
@@ -680,14 +727,22 @@ public sealed class CursorWebSyncService
     private static async Task WriteUsageJsonAsync(
         string cacheDir,
         IReadOnlyList<JsonElement> events,
+        string? accountId,
+        string? email,
         CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(cacheDir);
         var target = Path.Combine(cacheDir, UsageJsonFileName);
-        await WriteTextAtomicallyAsync(target, BuildUsageJsonText(events), cancellationToken).ConfigureAwait(true);
+        await WriteTextAtomicallyAsync(
+            target,
+            BuildUsageJsonText(events, accountId, email),
+            cancellationToken).ConfigureAwait(true);
     }
 
-    private static string BuildUsageJsonText(IReadOnlyList<JsonElement> events)
+    private static string BuildUsageJsonText(
+        IReadOnlyList<JsonElement> events,
+        string? accountId,
+        string? email)
     {
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true }))
@@ -696,6 +751,10 @@ public sealed class CursorWebSyncService
             writer.WriteNumber("version", 1);
             writer.WriteString("source", "webview-json");
             writer.WriteString("syncedAt", DateTime.UtcNow.ToString("O"));
+            if (!string.IsNullOrWhiteSpace(accountId))
+                writer.WriteString("accountId", accountId);
+            if (!string.IsNullOrWhiteSpace(email))
+                writer.WriteString("email", email);
             writer.WriteNumber("totalEvents", events.Count);
             writer.WritePropertyName("events");
             writer.WriteStartArray();
@@ -709,6 +768,20 @@ public sealed class CursorWebSyncService
         return json.EndsWith('\n') ? json : json + "\n";
     }
 
+    private static string? ExtractOwningUser(IReadOnlyList<JsonElement> events)
+    {
+        foreach (var item in events)
+        {
+            if (item.TryGetProperty("owningUser", out var value)
+                && value.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(value.GetString()))
+            {
+                return value.GetString();
+            }
+        }
+        return null;
+    }
+
     private static async Task WriteTextAtomicallyAsync(string target, string content, CancellationToken cancellationToken)
     {
         var tmp = target + ".tmp";
@@ -718,6 +791,34 @@ public sealed class CursorWebSyncService
             new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
             cancellationToken).ConfigureAwait(true);
         File.Move(tmp, target, overwrite: true);
+    }
+
+    private static async Task WriteUsageSyncStatusAsync(
+        string appDataDir,
+        string? accountId,
+        string status,
+        int actualEvents,
+        int? expectedEvents,
+        string? message,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(accountId))
+            return;
+        Directory.CreateDirectory(appDataDir);
+        var payload = new
+        {
+            version = 1,
+            accountId,
+            status,
+            actualEvents,
+            expectedEvents,
+            message,
+            updatedAt = DateTime.UtcNow.ToString("O"),
+        };
+        await WriteTextAtomicallyAsync(
+            Path.Combine(appDataDir, UsageSyncStatusFileName),
+            JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }),
+            cancellationToken).ConfigureAwait(true);
     }
 
     private static List<JsonElement> ExtractUsageEvents(JsonElement payload)
