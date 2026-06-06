@@ -98,7 +98,7 @@ export interface AgentPayload {
   dataStatus?: AgentDataStatus;
   sync?: AgentSyncResult;
   pricingRules: Array<{ label: string; patterns: string[]; input: number; cached: number; output: number }>;
-  records: Array<[number, string, string, number, number, number, number, number]>;
+  records: Array<[number, string, string, number, number, number, number, number, number?]>;
   ttfbRecords: Array<[number, string, string, number]>;
   failureRecords: Array<[number, string, string]>;
   views: Record<string, AgentView>;

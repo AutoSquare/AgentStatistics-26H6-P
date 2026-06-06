@@ -25,7 +25,7 @@ class CursorUsageStatsTests(unittest.TestCase):
             self.assertEqual(payload["source"], "cursor")
             self.assertIn("today", payload["views"])
             self.assertIn("history", payload["views"])
-            self.assertEqual(len(payload["records"][0]), 8)
+            self.assertEqual(len(payload["records"][0]), 9)
             self.assertEqual(payload["dataStatus"], "ok")
             self.assertFalse(payload.get("syncAttempted"))
             self.assertEqual(payload["sync"].get("engine"), "local-read")

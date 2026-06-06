@@ -119,6 +119,72 @@ def price_usage(
     }
 
 
+def price_event(
+    event: dict[str, Any],
+    pricing_rules: list[dict[str, Any]],
+    separate_cache: bool = False,
+) -> dict[str, float | int]:
+    """Use official per-event cost when present, scaled into local cost parts."""
+    usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+    estimated = price_usage(event.get("model") or "unknown", usage, pricing_rules, separate_cache)
+    raw_cost = event.get("cost")
+    try:
+        official_total = float(raw_cost)
+    except (TypeError, ValueError):
+        official_total = 0.0
+    if official_total <= 0:
+        return estimated
+
+    estimated_total = float(estimated["total"])
+    if estimated_total <= 0:
+        token_parts = token_cost_part_weights(usage, separate_cache)
+        token_total = sum(token_parts.values())
+        if token_total > 0:
+            return {
+                "input": official_total * token_parts["input"] / token_total,
+                "cached": official_total * token_parts["cached"] / token_total,
+                "output": official_total * token_parts["output"] / token_total,
+                "reasoning": official_total * token_parts["reasoning"] / token_total,
+                "total": official_total,
+                "pricedTokens": int(token_total),
+                "unpricedTokens": 0,
+            }
+        return {
+            "input": official_total,
+            "cached": 0.0,
+            "output": 0.0,
+            "reasoning": 0.0,
+            "total": official_total,
+            "pricedTokens": int(usage.get("total_tokens") or 0),
+            "unpricedTokens": 0,
+        }
+
+    scale = official_total / estimated_total
+    return {
+        "input": float(estimated["input"]) * scale,
+        "cached": float(estimated["cached"]) * scale,
+        "output": float(estimated["output"]) * scale,
+        "reasoning": float(estimated["reasoning"]) * scale,
+        "total": official_total,
+        "pricedTokens": int(estimated["pricedTokens"]),
+        "unpricedTokens": 0,
+    }
+
+
+def token_cost_part_weights(usage: dict[str, Any], separate_cache: bool = False) -> dict[str, int]:
+    input_tokens = max(0, int(usage.get("input_tokens") or 0))
+    cached_raw = max(0, int(usage.get("cached_input_tokens") or 0))
+    output_tokens = max(0, int(usage.get("output_tokens") or 0))
+    reasoning_tokens = max(0, int(usage.get("reasoning_output_tokens") or 0))
+    cached_tokens = cached_raw if separate_cache else min(cached_raw, input_tokens) if input_tokens > 0 else cached_raw
+    return {
+        "input": input_tokens,
+        "cached": cached_tokens,
+        "output": output_tokens,
+        "reasoning": reasoning_tokens,
+    }
+
+
 def choose_nice_step(duration_ms: int, target_buckets: int) -> int:
     steps_minutes = [1, 2, 5, 10, 15, 30, 60, 120, 240, 360, 720, 1440, 2880, 10080]
     for minutes in steps_minutes:
@@ -150,7 +216,7 @@ def build_buckets(
         for key in bucket["usage"]:
             bucket["usage"][key] += int(usage.get(key) or 0)
         bucket["calls"] += 1
-        bucket["cost"] += float(price_usage(event.get("model") or "unknown", usage, pricing_rules, separate_cache)["total"])
+        bucket["cost"] += float(price_event(event, pricing_rules, separate_cache)["total"])
     trend = [[b["ts"], b["usage"]["total_tokens"], b["usage"]["cached_input_tokens"], b["usage"]["output_tokens"], b["usage"]["input_tokens"], b["usage"]["reasoning_output_tokens"], b["calls"], round(b["cost"], 6)] for b in buckets]
     distribution = [[b["ts"], b["usage"]["total_tokens"], b["calls"], round(b["cost"], 6)] for b in buckets]
     return trend, distribution
@@ -211,7 +277,7 @@ def build_calendar_buckets(
         for key in bucket["usage"]:
             bucket["usage"][key] += int(usage.get(key) or 0)
         bucket["calls"] += 1
-        bucket["cost"] += float(price_usage(event.get("model") or "unknown", usage, pricing_rules, separate_cache)["total"])
+        bucket["cost"] += float(price_event(event, pricing_rules, separate_cache)["total"])
     rows = [buckets[key] for key in sorted(buckets)]
     trend = [[b["ts"], b["usage"]["total_tokens"], b["usage"]["cached_input_tokens"], b["usage"]["output_tokens"], b["usage"]["input_tokens"], b["usage"]["reasoning_output_tokens"], b["calls"], round(b["cost"], 6)] for b in rows]
     distribution = [[b["ts"], b["usage"]["total_tokens"], b["calls"], round(b["cost"], 6)] for b in rows]
@@ -340,7 +406,7 @@ def build_view(
         model = event.get("model") or "unknown"
         for field in totals:
             totals[field] += int(usage.get(field) or 0)
-        cost = price_usage(model, usage, pricing_rules, separate_cache)
+        cost = price_event(event, pricing_rules, separate_cache)
         for field in ("input", "cached", "output", "reasoning", "total"):
             costs[field] += float(cost[field])
         costs["unpricedTokens"] += int(cost["unpricedTokens"])
@@ -601,6 +667,7 @@ def build_standard_payload(
             int(event["usage"].get("output_tokens") or 0),
             int(event["usage"].get("reasoning_output_tokens") or 0),
             int(event["usage"].get("total_tokens") or 0),
+            round(float(event.get("cost") or 0.0), 6),
         ]
         for event in loaded["events"]
     ]

@@ -133,6 +133,8 @@ function exportCsv() {
     URL.revokeObjectURL(link.href);
 }
 function priceRecord(row) {
+    if (typeof row[8] === "number" && Number.isFinite(row[8]))
+        return row[8];
     const rules = props.payload?.pricingRules ?? [];
     const model = row[2].toLowerCase();
     const rule = rules.find((item) => item.patterns.some((pattern) => model.includes(pattern)));
