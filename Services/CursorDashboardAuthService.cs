@@ -11,30 +11,20 @@ namespace AgentStatistics.Services;
 /// </summary>
 public sealed class CursorDashboardAuthService
 {
-    private const string DashboardUsageUrl = "https://cursor.com/cn/dashboard/usage";
+    private const string DashboardUsageUrl = "https://cursor.com/cn/dashboard/spending";
 
     /// <summary>
     /// 引导 Dashboard 会话，可按调用方要求唤起默认浏览器并等待 Cookie 落盘。
     /// </summary>
     /// <param name="launchBrowser">是否在缺少 Cookie 时自动打开浏览器。</param>
+    /// <param name="waitSeconds">打开浏览器后等待 Cookie 写入的秒数。</param>
     /// <param name="cancellationToken">取消标记。</param>
     /// <returns>候选 Token 列表（按优先级排序）。</returns>
-    public async Task<CursorDashboardBootstrapResult> BootstrapAsync(
+    public Task<CursorDashboardBootstrapResult> BootstrapAsync(
         bool launchBrowser = true,
-        CancellationToken cancellationToken = default)
-    {
-        var fromPython = await RunBootstrapScriptAsync(launchBrowser, cancellationToken).ConfigureAwait(false);
-        if (fromPython.Candidates.Count > 0)
-            return fromPython;
-
-        if (launchBrowser)
-        {
-            LaunchDashboardBrowser();
-            CursorWebSyncLog.Write("auto-launched default browser for cursor.com/cn/dashboard/usage");
-        }
-
-        return fromPython;
-    }
+        int waitSeconds = 5,
+        CancellationToken cancellationToken = default) =>
+        RunBootstrapScriptAsync(launchBrowser, waitSeconds, cancellationToken);
 
     /// <summary>
     /// 唤起系统默认浏览器打开 Cursor Dashboard。
@@ -60,6 +50,7 @@ public sealed class CursorDashboardAuthService
 
     private static async Task<CursorDashboardBootstrapResult> RunBootstrapScriptAsync(
         bool launchBrowser,
+        int waitSeconds,
         CancellationToken cancellationToken)
     {
         var scriptPath = Path.Combine(AppPaths.PyFolder, "cursor_bootstrap_session.py");
@@ -84,6 +75,7 @@ public sealed class CursorDashboardAuthService
         };
         proc.StartInfo.Environment["PYTHONIOENCODING"] = "utf-8";
         proc.StartInfo.Environment["PYTHONUTF8"] = "1";
+        proc.StartInfo.Environment["AS_BOOTSTRAP_WAIT_SECONDS"] = Math.Max(0, waitSeconds).ToString();
         if (!launchBrowser)
             proc.StartInfo.Environment["AS_SKIP_BROWSER_LAUNCH"] = "1";
         proc.Start();

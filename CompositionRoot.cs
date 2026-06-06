@@ -33,10 +33,6 @@ public static partial class CompositionRoot
     public static CursorWebSyncService CursorWebSyncService =>
         Services.GetRequiredService<CursorWebSyncService>();
 
-    /// <summary>Cursor Session Token 解析器。</summary>
-    public static CursorSessionResolver CursorSessionResolver =>
-        Services.GetRequiredService<CursorSessionResolver>();
-
     /// <summary>Antigravity 用量统计服务。</summary>
     public static AntigravityUsageService AntigravityUsageService =>
         Services.GetRequiredService<AntigravityUsageService>();
@@ -48,8 +44,6 @@ public static partial class CompositionRoot
         c.AddSingleton<PythonBridge>();
         c.AddSingleton<SampleCalculationService>();
         c.AddSingleton<CodexUsageService>();
-        c.AddSingleton<CursorSessionResolver>();
-        c.AddSingleton<CursorDashboardAuthService>();
         c.AddSingleton<CursorWebSyncService>();
         c.AddSingleton<CursorUsageService>();
         c.AddSingleton<AntigravityUsageService>();

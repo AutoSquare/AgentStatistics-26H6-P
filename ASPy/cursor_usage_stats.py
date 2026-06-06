@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from cursor_auth import normalize_session_token
-from cursor_discover import decode_jwt_sub, iter_session_token_candidates, resolve_session_token
+from cursor_discover import decode_jwt_sub, iter_session_token_candidates
 from cursor_limits import build_cursor_risk_rows, default_limits_cache_path, probe_cursor_limits
 from cursor_sync import (
     derive_account_id,
@@ -47,9 +47,23 @@ def _account_store_dir(cache_dir: Path) -> Path:
     return cache_dir / "accounts"
 
 
+def normalize_cursor_account_id(account_id: str | None) -> str:
+    text = str(account_id or "").strip()
+    if "|" in text:
+        suffix = text.rsplit("|", 1)[-1]
+        if suffix.startswith("user_"):
+            return suffix
+    return text
+
+
 def _account_folder(cache_dir: Path, account_id: str) -> Path:
-    digest = hashlib.sha256(account_id.encode("utf-8")).hexdigest()[:16]
+    canonical_id = normalize_cursor_account_id(account_id)
+    digest = hashlib.sha256(canonical_id.encode("utf-8")).hexdigest()[:16]
     return _account_store_dir(cache_dir) / digest
+
+
+def _current_usage_account(cache_dir: Path) -> dict[str, Any] | None:
+    return _read_json_object(cache_dir / "usage-account.json")
 
 
 def _read_json_object(path: Path) -> dict[str, Any] | None:
@@ -100,8 +114,10 @@ def archive_current_account_sources(
     """Persist the current root snapshot under its Cursor account."""
     usage_path = cache_dir / "usage.json"
     usage_document = _read_json_object(usage_path)
-    stored_account = str((usage_document or {}).get("accountId") or "").strip()
-    effective_account = stored_account or account_id
+    current_account = _current_usage_account(cache_dir) or {}
+    stored_account = normalize_cursor_account_id((usage_document or {}).get("accountId"))
+    declared_account = normalize_cursor_account_id(current_account.get("accountId"))
+    effective_account = declared_account or stored_account or normalize_cursor_account_id(account_id)
     if not effective_account:
         return
 
@@ -113,6 +129,8 @@ def archive_current_account_sources(
         "version": 1,
         "accountId": effective_account,
         "email": (
+            current_account.get("email")
+            or
             (usage_document or {}).get("email")
             or (email if effective_account == account_id else None)
             or existing.get("email")
@@ -123,7 +141,7 @@ def archive_current_account_sources(
         encoding="utf-8",
     )
 
-    if usage_document and usage_path.is_file():
+    if usage_document and usage_path.is_file() and (not declared_account or stored_account == declared_account):
         shutil.copy2(usage_path, account_dir / "usage.json")
 
     legacy_csv = cache_dir / "usage.csv"
@@ -142,29 +160,51 @@ def load_cursor_accounts(
     days: int,
     cache_path: Path | None,
 ) -> list[dict[str, Any]]:
-    accounts: list[dict[str, Any]] = []
+    grouped: dict[str, dict[str, Any]] = {}
     store = _account_store_dir(cache_dir)
     if not store.is_dir():
-        return accounts
+        return []
     for metadata_path in sorted(store.glob("*/account.json")):
         metadata = _read_json_object(metadata_path)
         if not metadata:
             continue
-        account_id = str(metadata.get("accountId") or "").strip()
+        account_id = normalize_cursor_account_id(metadata.get("accountId"))
         if not account_id:
             continue
         account_dir = metadata_path.parent
         loaded = load_tokscale_usage(account_dir, "cursor", days, cache_path)
         if not loaded.get("events"):
             continue
-        accounts.append(
+        account = grouped.setdefault(
+            account_id,
             {
                 "id": account_id,
                 "email": metadata.get("email"),
                 "root": account_dir,
-                "loaded": loaded,
-            }
+                "loaded": {"sessions": [], "events": [], "ttfb_events": [], "failure_events": [], "limits": None},
+                "_event_keys": set(),
+                "_session_keys": set(),
+            },
         )
+        if not account.get("email") and metadata.get("email"):
+            account["email"] = metadata.get("email")
+        for event in loaded.get("events") or []:
+            key = json.dumps(event, ensure_ascii=False, sort_keys=True, default=str)
+            if key not in account["_event_keys"]:
+                account["_event_keys"].add(key)
+                account["loaded"]["events"].append(event)
+        for session in loaded.get("sessions") or []:
+            key = json.dumps(session, ensure_ascii=False, sort_keys=True, default=str)
+            if key not in account["_session_keys"]:
+                account["_session_keys"].add(key)
+                account["loaded"]["sessions"].append(session)
+        account["loaded"]["ttfb_events"].extend(loaded.get("ttfb_events") or [])
+        account["loaded"]["failure_events"].extend(loaded.get("failure_events") or [])
+    accounts = list(grouped.values())
+    for account in accounts:
+        account.pop("_event_keys", None)
+        account.pop("_session_keys", None)
+        account["loaded"]["events"].sort(key=lambda item: int(item.get("ts") or 0))
     return accounts
 
 
@@ -228,7 +268,7 @@ def build_payload(
 ) -> dict[str, Any]:
     normalized_token = normalize_session_token(session_token) if session_token else None
     resolved = enrich_cursor_identity(
-        resolve_session_token() if not normalized_token else {"token": normalized_token, "source": "argument"}
+        {"token": normalized_token, "source": "argument"} if normalized_token else None
     )
     sync_result: dict[str, Any] | None = None
     if do_sync:
@@ -247,18 +287,16 @@ def build_payload(
         sync_result = sync_cursor_cache(cache_dir, force=force_sync, skip_cloud=skip_cloud)
         if sync_result.get("synced") and sync_result.get("path"):
             invalidate_parse_cache_entries(cache_path, sync_result["path"], cache_dir / "usage.json")
-            resolved_for_persist = resolve_session_token()
-            if resolved_for_persist and resolved_for_persist.get("source") == "state.vscdb":
-                try:
-                    token_text = str(resolved_for_persist["token"])
-                    write_credentials(token_text, tokscale_credentials_path())
-                    write_credentials(token_text)
-                except ValueError:
-                    pass
 
-    token = resolved.get("token") if resolved else None
-    account_id = derive_account_id(str(token)) if token else ""
-    account_email = str(resolved.get("email") or "").strip() if resolved else ""
+    current_usage_account = _current_usage_account(cache_dir) or {}
+    current_online = current_usage_account.get("isOnline") is not False
+    token = resolved.get("token") if resolved and current_online else None
+    account_id = normalize_cursor_account_id(current_usage_account.get("accountId")) if current_online else ""
+    if not account_id and current_online:
+        account_id = normalize_cursor_account_id(derive_account_id(str(token))) if token else ""
+    account_email = str(current_usage_account.get("email") or "").strip() if current_online else ""
+    if not account_email and current_online:
+        account_email = str(resolved.get("email") or "").strip() if resolved else ""
     if account_id:
         archive_current_account_sources(cache_dir, account_id, account_email or None)
     accounts = load_cursor_accounts(cache_dir, days, cache_path)
@@ -326,11 +364,11 @@ def build_payload(
             [],
             risk_builder=risk_builder,
         )
-        identity = str(account["id"])
+        identity = normalize_cursor_account_id(account["id"])
         email = str(account.get("email") or "").strip()
         account_sync_status = (
             str(sync_status.get("status") or "ok")
-            if str(sync_status.get("accountId") or "") == identity
+            if normalize_cursor_account_id(sync_status.get("accountId")) == identity
             else "ok"
         )
         account_payloads.append(
@@ -340,6 +378,7 @@ def build_payload(
                 "label": email or f"Cursor 账号 · {identity[-8:]}",
                 "idSuffix": identity[-8:],
                 "isCurrent": identity == account_id,
+                "isOnline": current_online and identity == account_id,
                 "syncStatus": account_sync_status if account_sync_status in {"ok", "partial", "error"} else "error",
                 "syncMessage": sync_status.get("message") if account_sync_status != "ok" else None,
                 "views": account_payload["views"],

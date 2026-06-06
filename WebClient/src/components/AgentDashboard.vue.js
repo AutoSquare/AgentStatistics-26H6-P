@@ -316,12 +316,15 @@ if (__VLS_ctx.accountOptions.length) {
         if (account.isCurrent) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
         }
+        else {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        }
         __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
         (account.views[__VLS_ctx.activeRange]?.summary.totalTokensLabel ?? "0");
         __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
         (account.idSuffix);
         (account.views[__VLS_ctx.activeRange]?.summary.requestsLabel ?? "0");
-        if (account.syncStatus !== 'ok') {
+        if (account.isOnline && account.syncStatus !== 'ok') {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.em, __VLS_intrinsicElements.em)({});
         }
     }

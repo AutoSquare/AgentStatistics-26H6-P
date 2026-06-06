@@ -50,9 +50,18 @@
           </button>
         </div>
         <div v-else-if="activePage === 'cursor'" class="topbar-actions compact-actions">
-          <p class="auth-hint" :class="{ ready: cursorAuthAvailable }">
-            {{ cursorAuthAvailable ? "已连接 Cursor 账号" : "未检测到 Cursor 登录态" }}
+          <p class="auth-hint" :class="{ ready: cursorAuthAvailable, cache: !cursorAuthAvailable && cursorLocalCacheAvailable }">
+            {{
+              cursorAuthAvailable
+                ? "已连接 Cursor 官网"
+                : cursorLocalCacheAvailable
+                  ? "未登录官网（仅本地缓存）"
+                  : "未检测到 Cursor 登录态"
+            }}
           </p>
+          <button class="secondary-button" :disabled="pageStatus('cursor') === 'scanning'" @click="openCursorLogin">
+            登录 / 切换账号
+          </button>
           <button class="primary-button" :disabled="pageStatus('cursor') === 'scanning'" @click="refreshCursor">
             <RefreshCw :size="17" :class="{ spinning: pageStatus('cursor') === 'scanning' }" />
             刷新
@@ -165,6 +174,7 @@ const pageMessages = ref<Record<AgentSource, string>>({ codex: "等待数据", c
 const codexRootDraft = ref("");
 const antigravityCacheDraft = ref("");
 const cursorAuthAvailable = ref(false);
+const cursorLocalCacheAvailable = ref(false);
 
 const codexData = ref<AgentPayload | null>(null);
 const cursorData = ref<AgentPayload | null>(null);
@@ -205,6 +215,7 @@ onMounted(() => {
       if (typeof message.codexRoot === "string") codexRootDraft.value = message.codexRoot;
       if (typeof message.antigravityCachePath === "string") antigravityCacheDraft.value = message.antigravityCachePath;
       if (typeof message.cursorAuthAvailable === "boolean") cursorAuthAvailable.value = message.cursorAuthAvailable;
+      if (typeof message.cursorLocalCacheAvailable === "boolean") cursorLocalCacheAvailable.value = message.cursorLocalCacheAvailable;
     }
     if (message.type === "status") {
       const source = typeof message.source === "string" ? (message.source as AgentSource) : null;
@@ -275,6 +286,10 @@ function refreshCodex() {
 
 function refreshCursor() {
   postToHost({ type: "refreshCursor" });
+}
+
+function openCursorLogin() {
+  postToHost({ type: "openCursorLogin" });
 }
 
 function refreshAntigravity() {

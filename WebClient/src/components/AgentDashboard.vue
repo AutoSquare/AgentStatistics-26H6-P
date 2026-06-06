@@ -37,11 +37,12 @@
         <span class="account-name">
           {{ account.label }}
           <b v-if="account.isCurrent">当前</b>
+          <b v-else>离线</b>
         </span>
         <strong>{{ account.views[activeRange]?.summary.totalTokensLabel ?? "0" }}</strong>
         <small>
           ID …{{ account.idSuffix }} · {{ account.views[activeRange]?.summary.requestsLabel ?? "0" }} 次调用
-          <em v-if="account.syncStatus !== 'ok'">同步异常</em>
+          <em v-if="account.isOnline && account.syncStatus !== 'ok'">同步异常</em>
         </small>
       </button>
     </section>

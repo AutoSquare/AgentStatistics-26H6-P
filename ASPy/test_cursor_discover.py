@@ -49,8 +49,8 @@ class CursorDiscoverTests(unittest.TestCase):
                         candidates = discover.iter_session_token_candidates()
 
         self.assertEqual(len(candidates), 2)
-        self.assertEqual(candidates[0]["source"], "credentials")
-        self.assertEqual(candidates[1]["source"], "state.vscdb")
+        self.assertEqual(candidates[0]["source"], "state.vscdb")
+        self.assertEqual(candidates[1]["source"], "credentials")
 
     def test_discover_from_sqlite(self) -> None:
         access = make_access_token("github|user_test")

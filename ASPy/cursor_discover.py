@@ -124,10 +124,10 @@ def iter_session_token_candidates() -> list[dict[str, Any]]:
         candidates.append({**item, "token": token})
 
     add_candidate(discover_browser_dashboard_token())
+    add_candidate(discover_local_session_token())
     stored = read_credentials()
     if stored:
         add_candidate({"token": stored, "source": "credentials"})
-    add_candidate(discover_local_session_token())
     return candidates
 
 

@@ -81,6 +81,7 @@ export interface CursorAccountUsage {
   label: string;
   idSuffix: string;
   isCurrent: boolean;
+  isOnline: boolean;
   syncStatus: "ok" | "partial" | "error";
   syncMessage?: string;
   views: Record<string, AgentView>;

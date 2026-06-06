@@ -38,6 +38,10 @@ public partial class MainWindow : Window
     private bool _antigravityForceSync;
     private bool _cursorForceSync;
     private bool _cursorForceFullSync;
+    private bool _cursorLoginOpen;
+    private bool _cursorSuppressCacheWatcher;
+    private bool _cursorWebSyncInProgress;
+    private DateTimeOffset _cursorWebSyncBackoffUntil = DateTimeOffset.MinValue;
 
     /// <summary>
     /// 初始化主窗口并注入视图模型。
@@ -74,6 +78,8 @@ public partial class MainWindow : Window
         ConfigureCodexWatcher(_codexSessionsPath);
         ConfigureCursorWatcher(_cursorCachePath);
         ConfigureAntigravityWatcher(_antigravityCachePath);
+        if (!IsCursorWebsiteAuthenticated())
+            _ = Dispatcher.InvokeAsync(OpenCursorLoginAsync);
     }
 
     /// <summary>
@@ -138,6 +144,8 @@ public partial class MainWindow : Window
         DashboardWebView.CreationProperties.UserDataFolder = userDataFolder;
         CursorSyncWebView.CreationProperties ??= new CoreWebView2CreationProperties();
         CursorSyncWebView.CreationProperties.UserDataFolder = userDataFolder;
+        CursorLoginWebView.CreationProperties ??= new CoreWebView2CreationProperties();
+        CursorLoginWebView.CreationProperties.UserDataFolder = userDataFolder;
     }
 
     /// <summary>
@@ -156,39 +164,209 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
+    /// 初始化用于 Cursor 交互登录的 WebView2，与后台同步共享运行时环境。
+    /// </summary>
+    private async Task EnsureCursorLoginWebViewAsync()
+    {
+        if (CursorLoginWebView.CoreWebView2 is not null)
+            return;
+        if (DashboardWebView.CoreWebView2 is null)
+            await DashboardWebView.EnsureCoreWebView2Async().ConfigureAwait(true);
+        var environment = DashboardWebView.CoreWebView2?.Environment;
+        if (environment is null)
+            return;
+        await CursorLoginWebView.EnsureCoreWebView2Async(environment).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// 打开 Cursor 官网登录引导：使用系统浏览器完成 SSO，避免内嵌 WebView2 无法登录。
+    /// </summary>
+    private async Task OpenCursorLoginAsync()
+    {
+        _cursorLoginOpen = true;
+        _cursorAutoSyncTimer.Stop();
+        CursorLoginOverlay.Visibility = Visibility.Visible;
+        UpdateLayout();
+        await EnsureCursorSyncWebViewAsync().ConfigureAwait(true);
+        await EnsureCursorLoginWebViewAsync().ConfigureAwait(true);
+        if (CursorSyncWebView.CoreWebView2 is not null)
+            await CursorWebSyncService.ClearDashboardSessionAsync(CursorSyncWebView.CoreWebView2).ConfigureAwait(true);
+        if (CursorLoginWebView.CoreWebView2 is not null)
+        {
+            await CursorWebSyncService.ClearDashboardSessionAsync(CursorLoginWebView.CoreWebView2).ConfigureAwait(true);
+            CursorLoginWebView.CoreWebView2.Navigate(CursorWebSyncService.DashboardSpendingUrl);
+        }
+        await CursorWebSyncService.MarkWebsiteSessionOfflineAsync(_cursorCachePath).ConfigureAwait(true);
+        PostSettings();
+        CursorDashboardAuthService.LaunchDashboardBrowser();
+        CursorWebSyncLog.Write("cursor login overlay opened; cleared app webview session, navigated login webview, and launched system browser");
+        _ = CompleteCursorLoginAsync(showFailureMessage: false);
+    }
+
+    private void CursorLoginOpenBrowserButton_Click(object sender, RoutedEventArgs e)
+    {
+        CursorDashboardAuthService.LaunchDashboardBrowser();
+    }
+
+    /// <summary>
+    /// 登录浮层打开失败时恢复 UI 与定时器，并提示用户。
+    /// </summary>
+    /// <param name="message">错误说明。</param>
+    private void FailOpenCursorLogin(string message)
+    {
+        CloseCursorLoginOverlay();
+        MessageBox.Show(message, "AgentStatistics", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
+    /// <summary>
+    /// 关闭 Cursor 登录浮层并恢复后台同步定时器。
+    /// </summary>
+    private void CloseCursorLoginOverlay()
+    {
+        CursorLoginOverlay.Visibility = Visibility.Collapsed;
+        _cursorLoginOpen = false;
+        _cursorAutoSyncTimer.Start();
+    }
+
+    private void CursorLoginCancelButton_Click(object sender, RoutedEventArgs e)
+    {
+        CloseCursorLoginOverlay();
+    }
+
+    private async void CursorLoginDoneButton_Click(object sender, RoutedEventArgs e)
+    {
+        await CompleteCursorLoginAsync(showFailureMessage: true).ConfigureAwait(true);
+    }
+
+    private async Task CompleteCursorLoginAsync(bool showFailureMessage)
+    {
+        var loginWebView = CursorLoginWebView.CoreWebView2;
+        _cursorAutoSyncTimer.Stop();
+        _viewModel.StatusText = "正在读取浏览器登录态...";
+        var synced = false;
+        try
+        {
+            synced = await RunCursorWebSyncOnUiThreadAsync(
+                CancellationToken.None,
+                webView: loginWebView,
+                reuseCurrentNavigation: loginWebView is not null,
+                tryBootstrapCandidates: true,
+                bootstrapWaitSeconds: 45,
+                ignoreBackoff: true,
+                allowLoginOverlay: true).ConfigureAwait(true);
+        }
+        finally
+        {
+            if (!_cursorLoginOpen)
+                _cursorAutoSyncTimer.Start();
+        }
+
+        PostSettings();
+        if (synced)
+        {
+            CloseCursorLoginOverlay();
+            QueueCursorRefresh(TimeSpan.Zero, sync: false);
+        }
+        else
+        {
+            CursorLoginOverlay.Visibility = Visibility.Visible;
+            _cursorLoginOpen = true;
+            if (showFailureMessage)
+            {
+                MessageBox.Show(
+                    "仍未检测到 Cursor 官网登录态。\n\n请确认已在系统浏览器中登录 cursor.com（建议打开 spending 页面），然后再次点击「完成登录」。",
+                    "AgentStatistics",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+        }
+    }
+
+    /// <summary>
     /// 在 WPF UI 线程执行 Cursor WebView2 官网同步；<see cref="CoreWebView2"/> 成员禁止在后台线程访问。
     /// </summary>
     /// <param name="cancellationToken">取消标记。</param>
-    private async Task RunCursorWebSyncOnUiThreadAsync(CancellationToken cancellationToken)
+    /// <param name="webView">可选指定 WebView2；登录完成后应使用登录浮层实例以读取刚写入的 Cookie。</param>
+    /// <param name="reuseCurrentNavigation">是否保留当前 Dashboard 页面（登录浮层完成登录时使用）。</param>
+    /// <param name="tryBootstrapCandidates">是否在官网 Cookie 失效时回退 IDE / 浏览器凭据。</param>
+    /// <param name="bootstrapWaitSeconds">引导脚本等待浏览器 Cookie 的秒数。</param>
+    /// <param name="ignoreBackoff">是否忽略后台同步失败后的退避时间；用户手动完成登录时使用。</param>
+    /// <param name="allowLoginOverlay">是否允许登录浮层打开时执行同步；交互登录 WebView 使用。</param>
+    /// <returns>同步是否成功写入完整用量快照。</returns>
+    private async Task<bool> RunCursorWebSyncOnUiThreadAsync(
+        CancellationToken cancellationToken,
+        CoreWebView2? webView = null,
+        bool reuseCurrentNavigation = false,
+        bool tryBootstrapCandidates = true,
+        int bootstrapWaitSeconds = 0,
+        bool ignoreBackoff = false,
+        bool allowLoginOverlay = false)
     {
-        var sessionToken = await CompositionRoot.CursorSessionResolver
-            .ResolveSessionTokenAsync(cancellationToken)
-            .ConfigureAwait(false);
-
-        async Task RunAsync()
+        if (_cursorLoginOpen && webView is null && !allowLoginOverlay)
         {
-            await EnsureCursorSyncWebViewAsync().ConfigureAwait(true);
-            if (CursorSyncWebView.CoreWebView2 is null)
-            {
-                CursorWebSyncLog.Write("cursor web sync skipped: CoreWebView2 unavailable");
-                return;
-            }
+            CursorWebSyncLog.Write("cursor web sync skipped: login overlay is open");
+            return false;
+        }
 
-            await _cursorWebSyncService.TrySyncDashboardAsync(
-                _cursorCachePath,
-                UserSettingsStore.AppDataDirectory,
-                CursorSyncWebView.CoreWebView2,
-                sessionToken,
-                cancellationToken).ConfigureAwait(true);
+        if (_cursorWebSyncInProgress)
+        {
+            CursorWebSyncLog.Write("cursor web sync skipped: already in progress");
+            return false;
+        }
+
+        if (!ignoreBackoff && DateTimeOffset.UtcNow < _cursorWebSyncBackoffUntil)
+        {
+            CursorWebSyncLog.Write("cursor web sync skipped: backoff active");
+            return false;
+        }
+
+        async Task<bool> RunAsync()
+        {
+            _cursorWebSyncInProgress = true;
+            _cursorSuppressCacheWatcher = true;
+            try
+            {
+                CoreWebView2? targetWebView = webView;
+                if (targetWebView is null)
+                {
+                    await EnsureCursorSyncWebViewAsync().ConfigureAwait(true);
+                    targetWebView = CursorSyncWebView.CoreWebView2;
+                }
+
+                if (targetWebView is null)
+                {
+                    CursorWebSyncLog.Write("cursor web sync skipped: CoreWebView2 unavailable");
+                    return false;
+                }
+
+                var ok = await _cursorWebSyncService.TrySyncDashboardAsync(
+                    _cursorCachePath,
+                    UserSettingsStore.AppDataDirectory,
+                    targetWebView,
+                    null,
+                    cancellationToken,
+                    reuseCurrentNavigation,
+                    tryBootstrapCandidates,
+                    bootstrapWaitSeconds).ConfigureAwait(true);
+                if (!ok)
+                    _cursorWebSyncBackoffUntil = DateTimeOffset.UtcNow.AddMinutes(3);
+                else
+                    _cursorWebSyncBackoffUntil = DateTimeOffset.MinValue;
+                return ok;
+            }
+            finally
+            {
+                _cursorWebSyncInProgress = false;
+                _cursorSuppressCacheWatcher = false;
+            }
         }
 
         if (Dispatcher.CheckAccess())
         {
-            await RunAsync().ConfigureAwait(true);
-            return;
+            return await RunAsync().ConfigureAwait(true);
         }
 
-        await Dispatcher.InvokeAsync(RunAsync).Task.Unwrap().ConfigureAwait(true);
+        return await Dispatcher.InvokeAsync(RunAsync).Task.Unwrap().ConfigureAwait(true);
     }
 
     private void OnDashboardHostResized(object? sender, EventArgs e)
@@ -253,8 +431,8 @@ public partial class MainWindow : Window
                 case "ready":
                     PostSettings();
                     QueueRefresh("codex", TimeSpan.FromMilliseconds(100));
-                    QueueCursorRefresh(TimeSpan.FromMilliseconds(150), sync: false);
-                    QueueCursorRefresh(TimeSpan.FromMilliseconds(1500), sync: true, forceFullSync: true);
+                    QueueCursorRefresh(TimeSpan.FromMilliseconds(400), sync: false);
+                    QueueCursorRefresh(TimeSpan.FromMilliseconds(2000), sync: true, forceFullSync: true);
                     QueueAntigravityRefresh(TimeSpan.FromMilliseconds(200), sync: false);
                     QueueAntigravityRefresh(TimeSpan.FromMilliseconds(1200), sync: true);
                     break;
@@ -263,6 +441,16 @@ public partial class MainWindow : Window
                     break;
                 case "refreshCursor":
                     QueueCursorRefresh(TimeSpan.Zero, sync: true, forceFullSync: true);
+                    break;
+                case "openCursorLogin":
+                    try
+                    {
+                        await OpenCursorLoginAsync().ConfigureAwait(true);
+                    }
+                    catch (Exception ex)
+                    {
+                        FailOpenCursorLogin("打开 Cursor 登录窗口失败：\n\n" + ex.Message);
+                    }
                     break;
                 case "refreshAntigravity":
                     QueueAntigravityRefresh(TimeSpan.Zero, sync: true);
@@ -291,17 +479,6 @@ public partial class MainWindow : Window
                             await ChangeAntigravityCachePathAsync(path).ConfigureAwait(true);
                     }
                     break;
-                case "setCursorToken":
-                    if (root.TryGetProperty("token", out var tokenElement))
-                    {
-                        var token = tokenElement.GetString();
-                        if (!string.IsNullOrWhiteSpace(token))
-                        {
-                            await SaveCursorTokenAsync(token).ConfigureAwait(true);
-                            QueueCursorRefresh(TimeSpan.Zero, sync: true, forceFullSync: true);
-                        }
-                    }
-                    break;
             }
         }
         catch (JsonException ex)
@@ -317,9 +494,52 @@ public partial class MainWindow : Window
         json.Append(",\"codexRoot\":").Append(JsonSerializer.Serialize(_codexSessionsPath));
         json.Append(",\"cursorCachePath\":").Append(JsonSerializer.Serialize(_cursorCachePath));
         json.Append(",\"antigravityCachePath\":").Append(JsonSerializer.Serialize(_antigravityCachePath));
-        json.Append(",\"cursorAuthAvailable\":").Append(UserSettingsStore.CanResolveCursorAuth() ? "true" : "false");
+        json.Append(",\"cursorAuthAvailable\":").Append(IsCursorWebsiteAuthenticated() ? "true" : "false");
+        json.Append(",\"cursorLocalCacheAvailable\":").Append(HasCursorLocalCache() ? "true" : "false");
         json.Append('}');
         PostJson(json.ToString());
+    }
+
+    private bool IsCursorWebsiteAuthenticated() => TryReadUsageAccountOnline(out _);
+
+    private static bool HasCursorLocalCache()
+    {
+        var cacheDir = UserSettingsStore.LoadCursorCachePath();
+        return File.Exists(Path.Combine(cacheDir, "usage.json"))
+            || Directory.EnumerateFiles(cacheDir, "usage*.csv", SearchOption.TopDirectoryOnly).Any();
+    }
+
+    /// <summary>
+    /// 读取 usage-account.json 中的官网在线标记。
+    /// </summary>
+    private bool TryReadUsageAccountOnline(out string? accountId)
+    {
+        accountId = null;
+        var path = Path.Combine(_cursorCachePath, "usage-account.json");
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
+            var root = document.RootElement;
+            if (!root.TryGetProperty("isOnline", out var online) || online.ValueKind != JsonValueKind.True)
+                return false;
+            if (!root.TryGetProperty("accountId", out var accountElement)
+                || accountElement.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(accountElement.GetString()))
+            {
+                return false;
+            }
+
+            accountId = accountElement.GetString();
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private async Task ChangeCodexRootAsync(string path)
@@ -350,40 +570,6 @@ public partial class MainWindow : Window
         PostSettings();
         _antigravityForceSync = true;
         await RefreshSourceAsync("antigravity").ConfigureAwait(true);
-    }
-
-    private async Task SaveCursorTokenAsync(string token)
-    {
-        var normalized = CursorTokenNormalizer.Normalize(token);
-        if (string.IsNullOrWhiteSpace(normalized))
-        {
-            PostError("无效的 Cursor Session Token。请粘贴 WorkosCursorSessionToken Cookie 的值，而非名称。", "cursor");
-            return;
-        }
-        var credPath = Path.Combine(UserSettingsStore.AppDataDirectory, "cursor_credentials.json");
-        Directory.CreateDirectory(UserSettingsStore.AppDataDirectory);
-        var accountId = CursorTokenNormalizer.DeriveAccountId(normalized);
-        var payload = new
-        {
-            version = 1,
-            activeAccountId = accountId,
-            accounts = new Dictionary<string, object>
-            {
-                [accountId] = new
-                {
-                    sessionToken = normalized,
-                    userId = accountId,
-                    createdAt = DateTime.UtcNow.ToString("o"),
-                    expiresAt = (string?)null,
-                    label = (string?)null,
-                },
-            },
-        };
-        var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
-        var tmp = credPath + ".tmp";
-        await File.WriteAllTextAsync(tmp, json, Encoding.UTF8).ConfigureAwait(true);
-        File.Move(tmp, credPath, overwrite: true);
-        PostSettings();
     }
 
     private void ConfigureCodexWatcher(string path)
@@ -478,9 +664,13 @@ public partial class MainWindow : Window
 
     private void OnCursorAutoSyncTimerTick(object? sender, EventArgs e)
     {
+        if (_cursorLoginOpen || _cursorWebSyncInProgress)
+            return;
+        if (DateTimeOffset.UtcNow < _cursorWebSyncBackoffUntil)
+            return;
         if (_runningRefresh.Contains("cursor") || _pendingRefresh.Contains("cursor"))
             return;
-        QueueCursorRefresh(TimeSpan.FromMilliseconds(1), sync: true, forceFullSync: true);
+        QueueCursorRefresh(TimeSpan.FromMilliseconds(1), sync: true, forceFullSync: false);
     }
 
     private void QueueCursorRefresh(TimeSpan delay, bool sync, bool forceFullSync = false)
@@ -506,25 +696,20 @@ public partial class MainWindow : Window
             NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime,
             EnableRaisingEvents = true,
         };
-        _cursorWatcher.Changed += (_, e) => Dispatcher.Invoke(() =>
+        void QueueIfArtifact(string? name)
         {
-            if (IsCursorCacheArtifact(e.Name))
-                QueueCursorRefresh(TimeSpan.FromMilliseconds(300), sync: false);
-        });
-        _cursorWatcher.Created += (_, e) => Dispatcher.Invoke(() =>
-        {
-            if (IsCursorCacheArtifact(e.Name))
-                QueueCursorRefresh(TimeSpan.FromMilliseconds(300), sync: false);
-        });
-        _cursorWatcher.Deleted += (_, e) => Dispatcher.Invoke(() =>
-        {
-            if (IsCursorCacheArtifact(e.Name))
-                QueueCursorRefresh(TimeSpan.FromMilliseconds(300), sync: false);
-        });
+            if (_cursorSuppressCacheWatcher || !IsCursorCacheArtifact(name))
+                return;
+            QueueCursorRefresh(TimeSpan.FromMilliseconds(300), sync: false);
+        }
+
+        _cursorWatcher.Changed += (_, e) => Dispatcher.Invoke(() => QueueIfArtifact(e.Name));
+        _cursorWatcher.Created += (_, e) => Dispatcher.Invoke(() => QueueIfArtifact(e.Name));
+        _cursorWatcher.Deleted += (_, e) => Dispatcher.Invoke(() => QueueIfArtifact(e.Name));
         _cursorWatcher.Renamed += (_, e) => Dispatcher.Invoke(() =>
         {
-            if (IsCursorCacheArtifact(e.Name) || IsCursorCacheArtifact(e.OldName))
-                QueueCursorRefresh(TimeSpan.FromMilliseconds(300), sync: false);
+            QueueIfArtifact(e.Name);
+            QueueIfArtifact(e.OldName);
         });
         _cursorAutoSyncTimer.Stop();
         _cursorAutoSyncTimer.Start();
@@ -634,8 +819,8 @@ public partial class MainWindow : Window
                     PostJson("""{"type":"status","source":"codex","status":"idle","message":"已同步 Codex 用量。"}""");
                     break;
                 case "cursor":
-                    var cursorSync = _cursorForceSync;
-                    var cursorForceFullSync = _cursorForceFullSync;
+                    var cursorSync = _cursorForceSync && !_cursorLoginOpen;
+                    var cursorForceFullSync = _cursorForceFullSync && !_cursorLoginOpen;
                     _cursorForceSync = false;
                     _cursorForceFullSync = false;
                     _viewModel.StatusText = "正在扫描 Cursor 用量...";
@@ -663,6 +848,7 @@ public partial class MainWindow : Window
                     var cursorStatusMessage = BuildCursorStatusMessage(cursorPayload);
                     _viewModel.StatusText = "Cursor 用量统计已刷新";
                     PostJson($$"""{"type":"cursorData","payload":{{cursorPayload}}}""");
+                    PostSettings();
                     PostJson($$"""{"type":"status","source":"cursor","status":"idle","message":{{JsonSerializer.Serialize(cursorStatusMessage)}}}""");
                     break;
                 case "antigravity":

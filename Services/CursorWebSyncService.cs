@@ -1,4 +1,5 @@
 using System.IO;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -11,77 +12,113 @@ namespace AgentStatistics.Services;
 /// </summary>
 public sealed class CursorWebSyncService
 {
-    private readonly CursorDashboardAuthService _authService;
-
-    /// <summary>
-    /// 初始化 Dashboard 同步服务。
-    /// </summary>
-    /// <param name="authService">自动引导 Dashboard 登录态的服务。</param>
-    public CursorWebSyncService(CursorDashboardAuthService authService)
+    private enum SyncAttemptResult
     {
-        _authService = authService;
+        NotAuthenticated,
+        AuthenticatedFailed,
+        Success,
     }
 
+    private readonly CursorDashboardAuthService _dashboardAuthService = new();
+
     private const string DashboardOrigin = "https://cursor.com";
-    private const string DashboardUsageUrl = "https://cursor.com/cn/dashboard/usage";
+    public const string DashboardSpendingUrl = "https://cursor.com/cn/dashboard/spending";
     private const string UsageEventsApiUrl = "https://cursor.com/api/dashboard/get-filtered-usage-events";
     private const string UsageSummaryApiUrl = "https://cursor.com/api/usage-summary";
+    private const string AuthMeApiUrl = "https://cursor.com/api/auth/me";
+    private const string UsageCsvExportUrl = "https://cursor.com/api/dashboard/export-usage-events-csv?strategy=tokens";
     private const string WebUsageSummaryFileName = "cursor_web_usage_summary.json";
     private const string UsageSyncStatusFileName = "cursor_usage_sync_status.json";
+    private const string UsageAccountFileName = "usage-account.json";
     private const string UsageJsonFileName = "usage.json";
     private const int DefaultPageSize = 100;
     private const int MaxPages = 200;
     private const int CheckpointWaitMs = 45000;
+    private const int AuthBackgroundWaitMs = 12000;
+    private const int AuthInteractiveWaitMs = 120000;
     private const int CaptureWaitMs = 20000;
 
     /// <summary>
     /// 在一次 Dashboard 会话中同步用量 JSON 与 usage-summary。
     /// </summary>
+    /// <param name="reuseCurrentNavigation">为 true 时若当前页已在 Dashboard 路由则不再强制 Navigate，用于登录浮层「完成登录」。</param>
+    /// <param name="tryBootstrapCandidates">为 true 时在官网 Cookie 失效时回退 IDE / 浏览器 / 凭据候选并注入 Cookie。</param>
+    /// <param name="bootstrapWaitSeconds">引导脚本等待浏览器 Cookie 落盘的秒数。</param>
     public async Task<bool> TrySyncDashboardAsync(
         string cacheDir,
         string appDataDir,
         CoreWebView2 webView,
         string? sessionToken = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool reuseCurrentNavigation = false,
+        bool tryBootstrapCandidates = true,
+        int bootstrapWaitSeconds = 0)
     {
         if (string.IsNullOrWhiteSpace(cacheDir) || string.IsNullOrWhiteSpace(appDataDir) || webView is null)
             return false;
 
         try
         {
-            var bootstrap = await _authService.BootstrapAsync(launchBrowser: false, cancellationToken).ConfigureAwait(true);
-            if (bootstrap.LaunchedBrowser)
-                CursorWebSyncLog.Write("bootstrap launched browser and collected dashboard session candidates");
-
-            var candidates = BuildTokenCandidates(bootstrap, sessionToken);
-            if (candidates.Count == 0)
+            if (ShouldPreferEdgeDevTools(appDataDir)
+                && await TrySyncEdgeDevToolsFallbackAsync(cacheDir, appDataDir, cancellationToken, preferFastTimeout: true).ConfigureAwait(false))
             {
-                return await TrySyncDashboardWithTokenAsync(
-                        cacheDir,
-                        appDataDir,
-                        webView,
-                        null,
-                        "webview-session",
-                        null,
-                        null,
-                        cancellationToken)
-                    .ConfigureAwait(true);
+                return true;
             }
 
-            foreach (var candidate in candidates)
+            var currentSessionResult = await TrySyncDashboardWithTokenAsync(
+                    cacheDir,
+                    appDataDir,
+                    webView,
+                    string.IsNullOrWhiteSpace(sessionToken) ? null : CursorTokenNormalizer.Normalize(sessionToken),
+                    "website-session",
+                    null,
+                    null,
+                    cancellationToken,
+                    reuseCurrentNavigation)
+                .ConfigureAwait(true);
+            if (currentSessionResult == SyncAttemptResult.Success)
+                return true;
+
+            if (await TrySyncEdgeDevToolsFallbackAsync(cacheDir, appDataDir, cancellationToken).ConfigureAwait(false))
+                return true;
+
+            var attempts = new List<(string? Token, string Source, string? AccountId, string? Email)>();
+
+            if (tryBootstrapCandidates)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var ok = await TrySyncDashboardWithTokenAsync(
+                var bootstrap = await _dashboardAuthService.BootstrapAsync(
+                        launchBrowser: false,
+                        waitSeconds: bootstrapWaitSeconds,
+                        cancellationToken)
+                    .ConfigureAwait(true);
+                CursorWebSyncLog.Write(
+                    $"dashboard bootstrap candidates={bootstrap.Candidates.Count} sources={string.Join(",", bootstrap.Candidates.Select(c => c.Source ?? "bootstrap").Distinct(StringComparer.OrdinalIgnoreCase))}");
+                foreach (var candidate in bootstrap.Candidates)
+                {
+                    var source = candidate.Source ?? "bootstrap";
+                    attempts.Add((candidate.Token, source, candidate.AccountId, candidate.Email));
+                }
+            }
+
+            var seenTokens = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var (token, source, accountId, email) in attempts)
+            {
+                var normalized = string.IsNullOrWhiteSpace(token) ? null : CursorTokenNormalizer.Normalize(token);
+                if (!string.IsNullOrWhiteSpace(normalized) && !seenTokens.Add(normalized))
+                    continue;
+
+                var result = await TrySyncDashboardWithTokenAsync(
                         cacheDir,
                         appDataDir,
                         webView,
-                        candidate.Token,
-                        candidate.Source,
-                        candidate.AccountId,
-                        candidate.Email,
-                        cancellationToken)
+                        normalized,
+                        source,
+                        accountId,
+                        email,
+                        cancellationToken,
+                        reuseCurrentNavigation && string.IsNullOrWhiteSpace(normalized))
                     .ConfigureAwait(true);
-                if (ok)
+                if (result == SyncAttemptResult.Success)
                     return true;
             }
 
@@ -144,32 +181,7 @@ public sealed class CursorWebSyncService
             sessionToken,
             cancellationToken);
 
-    private static List<CursorDashboardTokenCandidate> BuildTokenCandidates(
-        CursorDashboardBootstrapResult bootstrap,
-        string? fallbackToken)
-    {
-        var results = new List<CursorDashboardTokenCandidate>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        void Add(string? token, string? source, string? accountId = null, string? email = null)
-        {
-            var normalized = CursorTokenNormalizer.Normalize(token);
-            if (string.IsNullOrWhiteSpace(normalized) || !seen.Add(normalized))
-                return;
-            results.Add(new CursorDashboardTokenCandidate(
-                normalized,
-                source,
-                accountId ?? CursorTokenNormalizer.DeriveAccountId(normalized),
-                email));
-        }
-
-        foreach (var candidate in bootstrap.Candidates)
-            Add(candidate.Token, candidate.Source, candidate.AccountId, candidate.Email);
-        Add(bootstrap.PrimaryToken, "bootstrap-primary");
-        Add(fallbackToken, "resolver-fallback");
-        return results;
-    }
-
-    private async Task<bool> TrySyncDashboardWithTokenAsync(
+    private async Task<SyncAttemptResult> TrySyncDashboardWithTokenAsync(
         string cacheDir,
         string appDataDir,
         CoreWebView2 webView,
@@ -177,17 +189,36 @@ public sealed class CursorWebSyncService
         string? source,
         string? accountId,
         string? email,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool reuseCurrentNavigation = false)
     {
         CursorWebSyncLog.Write($"dashboard sync try source={source ?? "unknown"}");
         var capture = new CursorDashboardCapture();
-        var context = await OpenDashboardContextAsync(webView, token, capture, cancellationToken).ConfigureAwait(true);
+        var context = await OpenDashboardContextAsync(
+            webView,
+            token,
+            capture,
+            cancellationToken,
+            reuseCurrentNavigation).ConfigureAwait(true);
         if (!context.Ready)
         {
             CursorWebSyncLog.Write(
                 $"dashboard not ready source={source ?? "unknown"} href={context.Href ?? "(unknown)"} checkpoint={context.OnCheckpoint} auth={context.OnAuthPage} cookie={context.HasSessionCookie} note={context.Note ?? capture.LastNote ?? "unknown"}");
-            return false;
+            return SyncAttemptResult.NotAuthenticated;
         }
+
+        var currentUser = await FetchCurrentUserFallbackAsync(webView, capture, cancellationToken).ConfigureAwait(true);
+        var authenticatedAccountId = ReadString(currentUser, "sub");
+        if (string.IsNullOrWhiteSpace(authenticatedAccountId))
+        {
+            CursorWebSyncLog.Write(
+                $"auth/me rejected source={source ?? "unknown"} href={context.Href ?? "(unknown)"} cookie={context.HasSessionCookie} note={capture.LastNote ?? "empty user"}");
+            return SyncAttemptResult.NotAuthenticated;
+        }
+
+        accountId = authenticatedAccountId ?? accountId;
+        email = ReadString(currentUser, "email") ?? email;
+        await WriteUsageAccountAsync(cacheDir, accountId, email, true, cancellationToken).ConfigureAwait(true);
 
         var events = capture.Events;
         if (events.Count == 0 || IsCapturedUsagePartial(capture))
@@ -218,6 +249,8 @@ public sealed class CursorWebSyncService
                 accountId,
                 email,
                 cancellationToken).ConfigureAwait(true);
+            if (!string.IsNullOrWhiteSpace(accountId))
+                await WriteUsageAccountAsync(cacheDir, accountId, email, true, cancellationToken).ConfigureAwait(true);
             await WriteUsageSyncStatusAsync(
                 appDataDir,
                 accountId,
@@ -231,19 +264,44 @@ public sealed class CursorWebSyncService
         }
         else if (events.Count > 0)
         {
+            var csvText = await FetchUsageCsvFallbackAsync(webView, capture, cancellationToken).ConfigureAwait(true);
+            if (!string.IsNullOrWhiteSpace(csvText))
+            {
+                await WriteTextAtomicallyAsync(
+                    Path.Combine(cacheDir, "usage.csv"),
+                    csvText,
+                    cancellationToken).ConfigureAwait(true);
+                if (!string.IsNullOrWhiteSpace(accountId))
+                    await WriteUsageAccountAsync(cacheDir, accountId, email, true, cancellationToken).ConfigureAwait(true);
+                await WriteUsageSyncStatusAsync(
+                    appDataDir,
+                    accountId,
+                    "ok",
+                    CountCsvRows(csvText),
+                    expectedCount,
+                    "官网 JSON 分页不完整，已使用官网 CSV 完整导出。",
+                    cancellationToken).ConfigureAwait(true);
+                CursorWebSyncLog.Write(
+                    $"usage-csv fallback ok rows={CountCsvRows(csvText)} jsonEvents={events.Count} total={expectedCount?.ToString() ?? "?"}");
+                usageOk = true;
+            }
+
             var rejectedAccountId = accountId ?? (!string.IsNullOrWhiteSpace(token)
                 ? CursorTokenNormalizer.DeriveAccountId(token)
                 : ExtractOwningUser(events));
-            await WriteUsageSyncStatusAsync(
-                appDataDir,
-                rejectedAccountId,
-                "partial",
-                events.Count,
-                expectedCount,
-                "官网分页结果不完整，已保留上一次完整用量快照。",
-                cancellationToken).ConfigureAwait(true);
-            CursorWebSyncLog.Write(
-                $"usage sync rejected partial events={events.Count} total={expectedCount?.ToString() ?? "?"}; keeping previous complete snapshot");
+            if (!usageOk)
+            {
+                await WriteUsageSyncStatusAsync(
+                    appDataDir,
+                    rejectedAccountId,
+                    "partial",
+                    events.Count,
+                    expectedCount,
+                    capture.LastNote ?? "官网分页结果不完整，已保留上一次完整用量快照。",
+                    cancellationToken).ConfigureAwait(true);
+                CursorWebSyncLog.Write(
+                    $"usage sync rejected partial events={events.Count} total={expectedCount?.ToString() ?? "?"} note={capture.LastNote ?? "unknown"}; keeping previous complete snapshot");
+            }
         }
         else
         {
@@ -257,7 +315,6 @@ public sealed class CursorWebSyncService
         else
             summary = await FetchUsageSummaryFallbackAsync(webView, capture, cancellationToken).ConfigureAwait(true);
 
-        var summaryOk = false;
         if (summary.ValueKind == JsonValueKind.Object)
         {
             Directory.CreateDirectory(appDataDir);
@@ -267,7 +324,6 @@ public sealed class CursorWebSyncService
                 ",\n  \"summary\": " + summary.GetRawText() + "\n}\n";
             await WriteTextAtomicallyAsync(target, json, cancellationToken).ConfigureAwait(true);
             CursorWebSyncLog.Write("usage-summary ok");
-            summaryOk = true;
         }
         else
         {
@@ -275,7 +331,11 @@ public sealed class CursorWebSyncService
                 $"usage-summary failed source={source ?? "unknown"} href={context.Href ?? "(unknown)"} note={capture.LastNote ?? context.Note ?? "empty"} auth={context.OnAuthPage} cookie={context.HasSessionCookie}");
         }
 
-        return usageOk || summaryOk;
+        if (usageOk)
+            return SyncAttemptResult.Success;
+        return !string.IsNullOrWhiteSpace(authenticatedAccountId) || events.Count > 0 || !string.IsNullOrWhiteSpace(token)
+            ? SyncAttemptResult.AuthenticatedFailed
+            : SyncAttemptResult.NotAuthenticated;
     }
 
     private static bool IsCapturedUsagePartial(CursorDashboardCapture capture) =>
@@ -295,21 +355,19 @@ public sealed class CursorWebSyncService
         CoreWebView2 webView,
         string? token,
         CursorDashboardCapture capture,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool reuseCurrentNavigation = false)
     {
-        if (!string.IsNullOrWhiteSpace(token))
-            await InjectSessionCookiesAsync(webView, token).ConfigureAwait(true);
-
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(TimeSpan.FromSeconds(150));
+
+        if (!string.IsNullOrWhiteSpace(token))
+            await ApplySessionTokenAsync(webView, token).ConfigureAwait(true);
 
         var navigationCompleted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs args)
         {
-            if (!args.IsSuccess)
-                return;
-            var source = webView.Source ?? string.Empty;
-            if (source.Contains("cursor.com", StringComparison.OrdinalIgnoreCase))
+            if (args.IsSuccess)
                 navigationCompleted.TrySetResult(true);
         }
 
@@ -324,11 +382,22 @@ public sealed class CursorWebSyncService
         webView.NavigationCompleted += OnNavigationCompleted;
         try
         {
-            webView.Navigate(DashboardUsageUrl);
-            using var _ = timeoutCts.Token.Register(() => navigationCompleted.TrySetResult(false));
-            await navigationCompleted.Task.ConfigureAwait(true);
+            var shouldNavigate = true;
+            if (reuseCurrentNavigation)
+            {
+                var current = await ProbeDashboardPageAsync(webView).ConfigureAwait(true);
+                shouldNavigate = !IsDashboardRoute(current.Href) && !IsAuthenticatorRoute(current.Href);
+            }
 
-            var context = await WaitForDashboardContextAsync(webView, token, timeoutCts.Token).ConfigureAwait(true);
+            if (shouldNavigate)
+            {
+                webView.Navigate(DashboardSpendingUrl);
+                using var _ = timeoutCts.Token.Register(() => navigationCompleted.TrySetResult(false));
+                await navigationCompleted.Task.ConfigureAwait(true);
+            }
+
+            var authWaitMs = reuseCurrentNavigation ? AuthInteractiveWaitMs : AuthBackgroundWaitMs;
+            var context = await WaitForDashboardContextAsync(webView, timeoutCts.Token, authWaitMs).ConfigureAwait(true);
             capture.PageHref = context.Href;
             capture.SawAuthPage = context.OnAuthPage;
 
@@ -348,33 +417,21 @@ public sealed class CursorWebSyncService
 
     private async Task<DashboardContext> WaitForDashboardContextAsync(
         CoreWebView2 webView,
-        string? injectedToken,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int authWaitMs)
     {
         var deadline = Environment.TickCount64 + CheckpointWaitMs;
+        var authDeadline = Environment.TickCount64 + authWaitMs;
         DashboardContext? last = null;
-        var pollCounter = 0;
         while (Environment.TickCount64 < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
             last = await ProbeDashboardPageAsync(webView).ConfigureAwait(true);
             if (last.Ready)
                 return last;
-            if (last.OnAuthPage && IsAuthenticatorRoute(last.Href))
+            if (last.OnAuthPage && IsAuthenticatorRoute(last.Href) && Environment.TickCount64 >= authDeadline)
             {
                 return last with { Ready = false, Note = "authenticator redirect; try next session candidate" };
-            }
-            if (last.OnAuthPage && !last.HasSessionCookie && ++pollCounter % 3 == 0)
-            {
-                var polled = await PollBrowserSessionTokenAsync(cancellationToken).ConfigureAwait(true);
-                if (!string.IsNullOrWhiteSpace(polled)
-                    && !string.Equals(polled, injectedToken, StringComparison.Ordinal))
-                {
-                    injectedToken = polled;
-                    await InjectSessionCookiesAsync(webView, polled).ConfigureAwait(true);
-                    webView.Reload();
-                    CursorWebSyncLog.Write("imported browser WorkosCursorSessionToken into WebView2");
-                }
             }
             await Task.Delay(1000, cancellationToken).ConfigureAwait(true);
         }
@@ -431,7 +488,7 @@ public sealed class CursorWebSyncService
         var href = root.TryGetProperty("href", out var hrefElement) ? hrefElement.GetString() : null;
         var hasCookie = await HasDashboardSessionCookieAsync(webView).ConfigureAwait(true);
         var onDashboardRoute = IsDashboardRoute(href);
-        var effectiveReady = ready || (onDashboardRoute && !checkpoint && !auth && hasCookie);
+        var effectiveReady = ready;
         return new DashboardContext
         {
             Ready = effectiveReady,
@@ -613,6 +670,89 @@ public sealed class CursorWebSyncService
         return default;
     }
 
+    private static async Task<JsonElement> FetchCurrentUserFallbackAsync(
+        CoreWebView2 webView,
+        CursorDashboardCapture capture,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var result = await FetchJsonGetAsync(webView, AuthMeApiUrl).ConfigureAwait(true);
+        if (result.ValueKind == JsonValueKind.Object)
+            return result;
+        capture.LastNote = "fetch auth/me failed";
+        return default;
+    }
+
+    private static async Task<string?> FetchUsageCsvFallbackAsync(
+        CoreWebView2 webView,
+        CursorDashboardCapture capture,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var script = $$"""
+            (async () => {
+              try {
+                const response = await fetch('{{UsageCsvExportUrl}}', {
+                  method: 'GET',
+                  credentials: 'include',
+                  headers: { 'Accept': 'text/csv,*/*' }
+                });
+                const text = await response.text();
+                return JSON.stringify({
+                  ok: response.ok,
+                  status: response.status,
+                  text: response.ok ? text : text.slice(0, 400)
+                });
+              } catch (error) {
+                return JSON.stringify({ ok: false, error: String(error) });
+              }
+            })();
+            """;
+        var raw = await webView.ExecuteScriptAsync(script).ConfigureAwait(true);
+        var decoded = UnwrapExecuteScriptPayload(raw);
+        if (string.IsNullOrWhiteSpace(decoded))
+            return null;
+        using var document = JsonDocument.Parse(decoded);
+        var root = document.RootElement;
+        if (root.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True
+            && root.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
+        {
+            var csv = text.GetString();
+            return CountCsvRows(csv) > 0 ? csv : null;
+        }
+        capture.LastNote = $"fetch usage-csv failed status={ReadInt(root, "status")} error={ReadString(root, "error") ?? ReadString(root, "text") ?? "unknown"}";
+        return null;
+    }
+
+    private static async Task<JsonElement> FetchJsonGetAsync(CoreWebView2 webView, string url)
+    {
+        var script = $$"""
+            (async () => {
+              try {
+                const response = await fetch('{{url}}', {
+                  method: 'GET',
+                  credentials: 'include',
+                  headers: { 'Accept': 'application/json' }
+                });
+                const text = await response.text();
+                return JSON.stringify({ ok: response.ok, status: response.status, json: response.ok ? JSON.parse(text) : null });
+              } catch (error) {
+                return JSON.stringify({ ok: false, error: String(error) });
+              }
+            })();
+            """;
+        var raw = await webView.ExecuteScriptAsync(script).ConfigureAwait(true);
+        var decoded = UnwrapExecuteScriptPayload(raw);
+        if (string.IsNullOrWhiteSpace(decoded))
+            return default;
+        using var document = JsonDocument.Parse(decoded);
+        var root = document.RootElement;
+        if (root.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True
+            && root.TryGetProperty("json", out var payload) && payload.ValueKind == JsonValueKind.Object)
+            return payload.Clone();
+        return default;
+    }
+
     private static async Task<string?> FetchUsagePageScriptAsync(
         CoreWebView2 webView,
         int page,
@@ -631,7 +771,7 @@ public sealed class CursorWebSyncService
                     'Content-Type': 'application/json',
                     'Accept': 'application/json',
                     'Origin': '{{DashboardOrigin}}',
-                    'Referer': '{{DashboardUsageUrl}}'
+                    'Referer': '{{DashboardSpendingUrl}}'
                   },
                   body: {{escapedBody}}
                 });
@@ -661,17 +801,6 @@ public sealed class CursorWebSyncService
             endDate = end.ToUnixTimeMilliseconds().ToString(),
         };
         return JsonSerializer.Serialize(payload);
-    }
-
-    private async Task<string?> PollBrowserSessionTokenAsync(CancellationToken cancellationToken)
-    {
-        var bootstrap = await _authService.BootstrapAsync(launchBrowser: false, cancellationToken).ConfigureAwait(true);
-        foreach (var candidate in bootstrap.Candidates)
-        {
-            if (string.Equals(candidate.Source, "browser-cookies", StringComparison.OrdinalIgnoreCase))
-                return candidate.Token;
-        }
-        return bootstrap.PrimaryToken;
     }
 
     private static string? UnwrapExecuteScriptPayload(string? raw)
@@ -706,22 +835,6 @@ public sealed class CursorWebSyncService
                 return normalized;
         }
         return null;
-    }
-
-    private static async Task InjectSessionCookiesAsync(CoreWebView2 webView, string token)
-    {
-        var manager = webView.CookieManager;
-        var expires = DateTime.UtcNow.AddDays(30);
-        foreach (var domain in new[] { ".cursor.com", "cursor.com" })
-        {
-            var cookie = manager.CreateCookie("WorkosCursorSessionToken", token, domain, "/");
-            cookie.IsSecure = true;
-            cookie.IsHttpOnly = true;
-            cookie.SameSite = CoreWebView2CookieSameSiteKind.None;
-            cookie.Expires = expires;
-            manager.AddOrUpdateCookie(cookie);
-        }
-        await Task.CompletedTask.ConfigureAwait(true);
     }
 
     private static async Task WriteUsageJsonAsync(
@@ -793,6 +906,97 @@ public sealed class CursorWebSyncService
         File.Move(tmp, target, overwrite: true);
     }
 
+    private static async Task WriteUsageAccountAsync(
+        string cacheDir,
+        string? accountId,
+        string? email,
+        bool isOnline,
+        CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(cacheDir);
+        var payload = new
+        {
+            version = 1,
+            accountId,
+            email,
+            isOnline,
+            updatedAt = DateTime.UtcNow.ToString("O"),
+        };
+        await WriteTextAtomicallyAsync(
+            Path.Combine(cacheDir, UsageAccountFileName),
+            JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true }),
+            cancellationToken).ConfigureAwait(true);
+    }
+
+    public static async Task ClearDashboardSessionAsync(CoreWebView2 webView)
+    {
+        webView.CookieManager.DeleteAllCookies();
+        await Task.CompletedTask.ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// 将引导得到的 Session Token 写入 WebView2 Cookie，供 Dashboard 同源 API 使用。
+    /// </summary>
+    /// <param name="webView">目标 WebView2。</param>
+    /// <param name="token">Session Token 或 Cookie 片段。</param>
+    private static async Task ApplySessionTokenAsync(CoreWebView2 webView, string token)
+    {
+        var normalized = CursorTokenNormalizer.Normalize(token);
+        if (string.IsNullOrWhiteSpace(normalized))
+            return;
+
+        await ClearSessionTokenCookieAsync(webView).ConfigureAwait(true);
+        var cookie = webView.CookieManager.CreateCookie(
+            "WorkosCursorSessionToken",
+            normalized,
+            ".cursor.com",
+            "/");
+        cookie.IsSecure = true;
+        cookie.IsHttpOnly = true;
+        cookie.SameSite = CoreWebView2CookieSameSiteKind.None;
+        webView.CookieManager.AddOrUpdateCookie(cookie);
+    }
+
+    private static async Task ClearSessionTokenCookieAsync(CoreWebView2 webView)
+    {
+        var cookies = await webView.CookieManager.GetCookiesAsync(DashboardOrigin).ConfigureAwait(true);
+        foreach (var cookie in cookies)
+        {
+            if (string.Equals(cookie.Name, "WorkosCursorSessionToken", StringComparison.Ordinal))
+                webView.CookieManager.DeleteCookie(cookie);
+        }
+    }
+
+    /// <summary>
+    /// 用户主动切换账号时标记官网会话离线。
+    /// </summary>
+    /// <param name="cacheDir">cursor-cache 目录。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    public static Task MarkWebsiteSessionOfflineAsync(string cacheDir, CancellationToken cancellationToken = default) =>
+        WriteUsageAccountAsync(cacheDir, null, null, false, cancellationToken);
+
+    private static int CountCsvRows(string? csv)
+    {
+        if (string.IsNullOrWhiteSpace(csv))
+            return 0;
+        return Math.Max(0, csv.Split('\n', StringSplitOptions.RemoveEmptyEntries).Length - 1);
+    }
+
+    private static string? ReadString(JsonElement element, string name) =>
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static int ReadInt(JsonElement element, string name) =>
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(name, out var value)
+        && value.ValueKind == JsonValueKind.Number
+        && value.TryGetInt32(out var number)
+            ? number
+            : 0;
+
     private static async Task WriteUsageSyncStatusAsync(
         string appDataDir,
         string? accountId,
@@ -838,4 +1042,132 @@ public sealed class CursorWebSyncService
         && uri.Contains("cursor.com/api/", StringComparison.OrdinalIgnoreCase)
         && (uri.Contains("get-filtered-usage-events", StringComparison.OrdinalIgnoreCase)
             || uri.Contains("usage-summary", StringComparison.OrdinalIgnoreCase));
+
+    private static bool ShouldPreferEdgeDevTools(string appDataDir)
+    {
+        try
+        {
+            var path = Path.Combine(appDataDir, UsageSyncStatusFileName);
+            if (!File.Exists(path))
+                return false;
+
+            using var document = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
+            var root = document.RootElement;
+            var status = ReadString(root, "status");
+            if (!string.Equals(status, "ok", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var source = ReadString(root, "source");
+            var message = ReadString(root, "message");
+            return string.Equals(source, "edge-devtools-json", StringComparison.OrdinalIgnoreCase)
+                   || string.Equals(message, "Edge DevTools sync ok", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static async Task<bool> TrySyncEdgeDevToolsFallbackAsync(
+        string cacheDir,
+        string appDataDir,
+        CancellationToken cancellationToken,
+        bool preferFastTimeout = false)
+    {
+        var scriptPath = Path.Combine(AppPaths.PyFolder, "cursor_edge_devtools_sync.py");
+        if (!File.Exists(scriptPath) || !File.Exists(AppPaths.PythonExe))
+        {
+            CursorWebSyncLog.Write("edge devtools fallback skipped: sync script or Python runtime is unavailable");
+            return false;
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        var timeoutSeconds = preferFastTimeout ? 12 : 45;
+        CursorWebSyncLog.Write(preferFastTimeout ? "edge devtools primary try" : "edge devtools fallback try");
+        using var proc = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = AppPaths.PythonExe,
+                Arguments = $"-u \"{scriptPath}\" --cache-dir \"{cacheDir}\" --app-data-dir \"{appDataDir}\" --timeout {timeoutSeconds}",
+                WorkingDirectory = AppPaths.PyFolder,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+                StandardOutputEncoding = new UTF8Encoding(false),
+                StandardErrorEncoding = new UTF8Encoding(false),
+            },
+            EnableRaisingEvents = true,
+        };
+        proc.StartInfo.Environment["PYTHONIOENCODING"] = "utf-8";
+        proc.StartInfo.Environment["PYTHONUTF8"] = "1";
+
+        try
+        {
+            proc.Start();
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stderrTask = proc.StandardError.ReadToEndAsync(cancellationToken);
+            await proc.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+
+            var stdout = (await stdoutTask.ConfigureAwait(false)).Trim();
+            var stderr = (await stderrTask.ConfigureAwait(false)).Trim();
+            if (proc.ExitCode != 0)
+            {
+                CursorWebSyncLog.Write($"edge devtools sync failed elapsedMs={stopwatch.ElapsedMilliseconds} exit={proc.ExitCode} note={SummarizeProcessOutput(stderr, stdout)}");
+                return false;
+            }
+
+            using var document = JsonDocument.Parse(stdout);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("ok", out var okElement)
+                || okElement.ValueKind != JsonValueKind.True)
+            {
+                CursorWebSyncLog.Write($"edge devtools sync rejected elapsedMs={stopwatch.ElapsedMilliseconds} note={SummarizeProcessOutput(stdout, stderr)}");
+                return false;
+            }
+
+            var actual = root.TryGetProperty("actualEvents", out var actualElement) && actualElement.TryGetInt32(out var actualEvents)
+                ? actualEvents.ToString()
+                : "?";
+            var expected = root.TryGetProperty("expectedEvents", out var expectedElement) && expectedElement.TryGetInt32(out var expectedEvents)
+                ? expectedEvents.ToString()
+                : "?";
+            CursorWebSyncLog.Write($"edge devtools sync ok elapsedMs={stopwatch.ElapsedMilliseconds} events={actual}/{expected}");
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            TryKill(proc);
+            throw;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or JsonException)
+        {
+            CursorWebSyncLog.Write($"edge devtools sync error elapsedMs={stopwatch.ElapsedMilliseconds}: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static string SummarizeProcessOutput(string primary, string secondary)
+    {
+        var text = string.IsNullOrWhiteSpace(primary) ? secondary : primary;
+        text = text.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        return text.Length <= 240 ? text : text[..240];
+    }
+
+    private static void TryKill(Process proc)
+    {
+        try
+        {
+            if (!proc.HasExited)
+                proc.Kill(false);
+        }
+        catch (InvalidOperationException)
+        {
+        }
+        catch (NotSupportedException)
+        {
+        }
+    }
 }
