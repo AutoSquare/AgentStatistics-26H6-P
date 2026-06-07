@@ -1,5 +1,6 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Activity, FileText, FolderInput, Layers3, MousePointer2, Orbit, RefreshCw } from "@lucide/vue";
+import { buildTotalStatusKind, buildTotalStatusMessage, mergeAgentPayloads } from "./aggregatePayload";
 import AgentDashboard from "./components/AgentDashboard.vue";
 import { onHostMessage, postToHost } from "./host";
 import { buildAgentStatusMessage } from "./payloadStatus";
@@ -25,12 +26,17 @@ const antigravityData = ref(null);
 const codexRange = ref("today");
 const cursorRange = ref("today");
 const antigravityRange = ref("today");
+const totalRange = ref("today");
 const sidebarWidth = ref(loadSidebarWidth());
 const workspace = ref(null);
 const codexDashboard = ref(null);
 const cursorDashboard = ref(null);
 const antigravityDashboard = ref(null);
+const totalDashboard = ref(null);
 const chartWidth = ref(0);
+const totalPayload = computed(() => mergeAgentPayloads(codexData.value, cursorData.value, antigravityData.value));
+const totalStatusKind = computed(() => buildTotalStatusKind(pageStatuses.value));
+const totalStatusMessage = computed(() => buildTotalStatusMessage(pageStatuses.value, pageMessages.value));
 let resizeObserver = null;
 let resizeFrame = 0;
 const pageTitle = computed(() => {
@@ -122,7 +128,13 @@ function scheduleChartResize() {
         codexDashboard.value?.scheduleChartResize();
         cursorDashboard.value?.scheduleChartResize();
         antigravityDashboard.value?.scheduleChartResize();
+        totalDashboard.value?.scheduleChartResize();
     });
+}
+function refreshAll() {
+    refreshCodex();
+    refreshCursor();
+    refreshAntigravity();
 }
 function refreshCodex() {
     postToHost({ type: "refresh" });
@@ -379,10 +391,34 @@ else if (__VLS_ctx.activePage === 'antigravity') {
         ...{ class: ({ spinning: __VLS_ctx.pageStatus('antigravity') === 'scanning' }) },
     }, ...__VLS_functionalComponentArgsRest(__VLS_21));
 }
+else if (__VLS_ctx.activePage === 'total') {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "topbar-actions compact-actions" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({
+        ...{ class: "auth-hint ready" },
+    });
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
+        ...{ onClick: (__VLS_ctx.refreshAll) },
+        ...{ class: "primary-button" },
+        disabled: (__VLS_ctx.totalStatusKind === 'scanning'),
+    });
+    const __VLS_24 = {}.RefreshCw;
+    /** @type {[typeof __VLS_components.RefreshCw, ]} */ ;
+    // @ts-ignore
+    const __VLS_25 = __VLS_asFunctionalComponent(__VLS_24, new __VLS_24({
+        size: (17),
+        ...{ class: ({ spinning: __VLS_ctx.totalStatusKind === 'scanning' }) },
+    }));
+    const __VLS_26 = __VLS_25({
+        size: (17),
+        ...{ class: ({ spinning: __VLS_ctx.totalStatusKind === 'scanning' }) },
+    }, ...__VLS_functionalComponentArgsRest(__VLS_25));
+}
 if (__VLS_ctx.activePage === 'codex') {
     /** @type {[typeof AgentDashboard, ]} */ ;
     // @ts-ignore
-    const __VLS_24 = __VLS_asFunctionalComponent(AgentDashboard, new AgentDashboard({
+    const __VLS_28 = __VLS_asFunctionalComponent(AgentDashboard, new AgentDashboard({
         ...{ 'onUpdate:activeRange': {} },
         ref: "codexDashboard",
         payload: (__VLS_ctx.codexData),
@@ -395,7 +431,7 @@ if (__VLS_ctx.activePage === 'codex') {
         emptyDescription: "应用会监听本地 Codex 会话日志。也可以点击刷新立即扫描。",
         riskCaption: "来自 Codex rate_limits",
     }));
-    const __VLS_25 = __VLS_24({
+    const __VLS_29 = __VLS_28({
         ...{ 'onUpdate:activeRange': {} },
         ref: "codexDashboard",
         payload: (__VLS_ctx.codexData),
@@ -407,11 +443,11 @@ if (__VLS_ctx.activePage === 'codex') {
         emptyTitle: "等待 Codex 用量数据",
         emptyDescription: "应用会监听本地 Codex 会话日志。也可以点击刷新立即扫描。",
         riskCaption: "来自 Codex rate_limits",
-    }, ...__VLS_functionalComponentArgsRest(__VLS_24));
-    let __VLS_27;
-    let __VLS_28;
-    let __VLS_29;
-    const __VLS_30 = {
+    }, ...__VLS_functionalComponentArgsRest(__VLS_28));
+    let __VLS_31;
+    let __VLS_32;
+    let __VLS_33;
+    const __VLS_34 = {
         'onUpdate:activeRange': (...[$event]) => {
             if (!(__VLS_ctx.activePage === 'codex'))
                 return;
@@ -419,13 +455,13 @@ if (__VLS_ctx.activePage === 'codex') {
         }
     };
     /** @type {typeof __VLS_ctx.codexDashboard} */ ;
-    var __VLS_31 = {};
-    var __VLS_26;
+    var __VLS_35 = {};
+    var __VLS_30;
 }
 else if (__VLS_ctx.activePage === 'cursor') {
     /** @type {[typeof AgentDashboard, ]} */ ;
     // @ts-ignore
-    const __VLS_33 = __VLS_asFunctionalComponent(AgentDashboard, new AgentDashboard({
+    const __VLS_37 = __VLS_asFunctionalComponent(AgentDashboard, new AgentDashboard({
         ...{ 'onUpdate:activeRange': {} },
         ref: "cursorDashboard",
         payload: (__VLS_ctx.cursorData),
@@ -438,7 +474,7 @@ else if (__VLS_ctx.activePage === 'cursor') {
         emptyDescription: "请先确认本机已登录 Cursor，然后点击刷新。",
         riskCaption: "Cursor 额度",
     }));
-    const __VLS_34 = __VLS_33({
+    const __VLS_38 = __VLS_37({
         ...{ 'onUpdate:activeRange': {} },
         ref: "cursorDashboard",
         payload: (__VLS_ctx.cursorData),
@@ -450,11 +486,11 @@ else if (__VLS_ctx.activePage === 'cursor') {
         emptyTitle: "等待 Cursor 用量数据",
         emptyDescription: "请先确认本机已登录 Cursor，然后点击刷新。",
         riskCaption: "Cursor 额度",
-    }, ...__VLS_functionalComponentArgsRest(__VLS_33));
-    let __VLS_36;
-    let __VLS_37;
-    let __VLS_38;
-    const __VLS_39 = {
+    }, ...__VLS_functionalComponentArgsRest(__VLS_37));
+    let __VLS_40;
+    let __VLS_41;
+    let __VLS_42;
+    const __VLS_43 = {
         'onUpdate:activeRange': (...[$event]) => {
             if (!!(__VLS_ctx.activePage === 'codex'))
                 return;
@@ -464,13 +500,13 @@ else if (__VLS_ctx.activePage === 'cursor') {
         }
     };
     /** @type {typeof __VLS_ctx.cursorDashboard} */ ;
-    var __VLS_40 = {};
-    var __VLS_35;
+    var __VLS_44 = {};
+    var __VLS_39;
 }
 else if (__VLS_ctx.activePage === 'antigravity') {
     /** @type {[typeof AgentDashboard, ]} */ ;
     // @ts-ignore
-    const __VLS_42 = __VLS_asFunctionalComponent(AgentDashboard, new AgentDashboard({
+    const __VLS_46 = __VLS_asFunctionalComponent(AgentDashboard, new AgentDashboard({
         ...{ 'onUpdate:activeRange': {} },
         ref: "antigravityDashboard",
         payload: (__VLS_ctx.antigravityData),
@@ -483,7 +519,7 @@ else if (__VLS_ctx.activePage === 'antigravity') {
         emptyDescription: "刷新时会从运行中的 Antigravity CLI（agy）同步用量，并读取 ~/.gemini/antigravity-cli 的 transcript 与 antigravity-cache；CLI 未运行时仍可读取已有本地数据。",
         riskCaption: "来自 Antigravity Connect RPC",
     }));
-    const __VLS_43 = __VLS_42({
+    const __VLS_47 = __VLS_46({
         ...{ 'onUpdate:activeRange': {} },
         ref: "antigravityDashboard",
         payload: (__VLS_ctx.antigravityData),
@@ -495,11 +531,11 @@ else if (__VLS_ctx.activePage === 'antigravity') {
         emptyTitle: "等待 Antigravity 用量数据",
         emptyDescription: "刷新时会从运行中的 Antigravity CLI（agy）同步用量，并读取 ~/.gemini/antigravity-cli 的 transcript 与 antigravity-cache；CLI 未运行时仍可读取已有本地数据。",
         riskCaption: "来自 Antigravity Connect RPC",
-    }, ...__VLS_functionalComponentArgsRest(__VLS_42));
-    let __VLS_45;
-    let __VLS_46;
-    let __VLS_47;
-    const __VLS_48 = {
+    }, ...__VLS_functionalComponentArgsRest(__VLS_46));
+    let __VLS_49;
+    let __VLS_50;
+    let __VLS_51;
+    const __VLS_52 = {
         'onUpdate:activeRange': (...[$event]) => {
             if (!!(__VLS_ctx.activePage === 'codex'))
                 return;
@@ -511,8 +547,57 @@ else if (__VLS_ctx.activePage === 'antigravity') {
         }
     };
     /** @type {typeof __VLS_ctx.antigravityDashboard} */ ;
-    var __VLS_49 = {};
-    var __VLS_44;
+    var __VLS_53 = {};
+    var __VLS_48;
+}
+else if (__VLS_ctx.activePage === 'total') {
+    /** @type {[typeof AgentDashboard, ]} */ ;
+    // @ts-ignore
+    const __VLS_55 = __VLS_asFunctionalComponent(AgentDashboard, new AgentDashboard({
+        ...{ 'onUpdate:activeRange': {} },
+        ref: "totalDashboard",
+        payload: (__VLS_ctx.totalPayload),
+        activeRange: (__VLS_ctx.totalRange),
+        statusKind: (__VLS_ctx.totalStatusKind),
+        statusMessage: (__VLS_ctx.totalStatusMessage),
+        chartWidth: (__VLS_ctx.chartWidth),
+        active: (__VLS_ctx.activePage === 'total'),
+        emptyTitle: "等待跨 Agent 用量数据",
+        emptyDescription: "启动后三源会自动刷新；也可点击「刷新全部」并行更新 Codex、Cursor、Antigravity。",
+        riskCaption: "",
+    }));
+    const __VLS_56 = __VLS_55({
+        ...{ 'onUpdate:activeRange': {} },
+        ref: "totalDashboard",
+        payload: (__VLS_ctx.totalPayload),
+        activeRange: (__VLS_ctx.totalRange),
+        statusKind: (__VLS_ctx.totalStatusKind),
+        statusMessage: (__VLS_ctx.totalStatusMessage),
+        chartWidth: (__VLS_ctx.chartWidth),
+        active: (__VLS_ctx.activePage === 'total'),
+        emptyTitle: "等待跨 Agent 用量数据",
+        emptyDescription: "启动后三源会自动刷新；也可点击「刷新全部」并行更新 Codex、Cursor、Antigravity。",
+        riskCaption: "",
+    }, ...__VLS_functionalComponentArgsRest(__VLS_55));
+    let __VLS_58;
+    let __VLS_59;
+    let __VLS_60;
+    const __VLS_61 = {
+        'onUpdate:activeRange': (...[$event]) => {
+            if (!!(__VLS_ctx.activePage === 'codex'))
+                return;
+            if (!!(__VLS_ctx.activePage === 'cursor'))
+                return;
+            if (!!(__VLS_ctx.activePage === 'antigravity'))
+                return;
+            if (!(__VLS_ctx.activePage === 'total'))
+                return;
+            __VLS_ctx.totalRange = $event;
+        }
+    };
+    /** @type {typeof __VLS_ctx.totalDashboard} */ ;
+    var __VLS_62 = {};
+    var __VLS_57;
 }
 else if (__VLS_ctx.activePage === 'generic') {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
@@ -521,34 +606,15 @@ else if (__VLS_ctx.activePage === 'generic') {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "empty-panel" },
     });
-    const __VLS_51 = {}.FileText;
+    const __VLS_64 = {}.FileText;
     /** @type {[typeof __VLS_components.FileText, ]} */ ;
     // @ts-ignore
-    const __VLS_52 = __VLS_asFunctionalComponent(__VLS_51, new __VLS_51({
+    const __VLS_65 = __VLS_asFunctionalComponent(__VLS_64, new __VLS_64({
         size: (36),
     }));
-    const __VLS_53 = __VLS_52({
+    const __VLS_66 = __VLS_65({
         size: (36),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_52));
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-}
-else {
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
-        ...{ class: "page" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "empty-panel" },
-    });
-    const __VLS_55 = {}.Layers3;
-    /** @type {[typeof __VLS_components.Layers3, ]} */ ;
-    // @ts-ignore
-    const __VLS_56 = __VLS_asFunctionalComponent(__VLS_55, new __VLS_55({
-        size: (36),
-    }));
-    const __VLS_57 = __VLS_56({
-        size: (36),
-    }, ...__VLS_functionalComponentArgsRest(__VLS_56));
+    }, ...__VLS_functionalComponentArgsRest(__VLS_65));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
     __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
 }
@@ -576,19 +642,21 @@ else {
 /** @type {__VLS_StyleScopedClasses['path-field']} */ ;
 /** @type {__VLS_StyleScopedClasses['secondary-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
-/** @type {__VLS_StyleScopedClasses['page']} */ ;
-/** @type {__VLS_StyleScopedClasses['empty-panel']} */ ;
+/** @type {__VLS_StyleScopedClasses['topbar-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['compact-actions']} */ ;
+/** @type {__VLS_StyleScopedClasses['auth-hint']} */ ;
+/** @type {__VLS_StyleScopedClasses['ready']} */ ;
+/** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['page']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-panel']} */ ;
 // @ts-ignore
-var __VLS_32 = __VLS_31, __VLS_41 = __VLS_40, __VLS_50 = __VLS_49;
+var __VLS_36 = __VLS_35, __VLS_45 = __VLS_44, __VLS_54 = __VLS_53, __VLS_63 = __VLS_62;
 var __VLS_dollars;
 const __VLS_self = (await import('vue')).defineComponent({
     setup() {
         return {
             FileText: FileText,
             FolderInput: FolderInput,
-            Layers3: Layers3,
             RefreshCw: RefreshCw,
             AgentDashboard: AgentDashboard,
             navItems: navItems,
@@ -605,15 +673,21 @@ const __VLS_self = (await import('vue')).defineComponent({
             codexRange: codexRange,
             cursorRange: cursorRange,
             antigravityRange: antigravityRange,
+            totalRange: totalRange,
             sidebarWidth: sidebarWidth,
             workspace: workspace,
             codexDashboard: codexDashboard,
             cursorDashboard: cursorDashboard,
             antigravityDashboard: antigravityDashboard,
+            totalDashboard: totalDashboard,
             chartWidth: chartWidth,
+            totalPayload: totalPayload,
+            totalStatusKind: totalStatusKind,
+            totalStatusMessage: totalStatusMessage,
             pageTitle: pageTitle,
             pageStatus: pageStatus,
             pageMessage: pageMessage,
+            refreshAll: refreshAll,
             refreshCodex: refreshCodex,
             refreshCursor: refreshCursor,
             refreshAntigravity: refreshAntigravity,

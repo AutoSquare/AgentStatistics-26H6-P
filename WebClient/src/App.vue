@@ -78,6 +78,13 @@
             刷新
           </button>
         </div>
+        <div v-else-if="activePage === 'total'" class="topbar-actions compact-actions">
+          <p class="auth-hint ready">合并 Codex、Cursor、Antigravity 三源快照</p>
+          <button class="primary-button" :disabled="totalStatusKind === 'scanning'" @click="refreshAll">
+            <RefreshCw :size="17" :class="{ spinning: totalStatusKind === 'scanning' }" />
+            刷新全部
+          </button>
+        </div>
       </header>
 
       <AgentDashboard
@@ -125,19 +132,26 @@
         @update:active-range="antigravityRange = $event"
       />
 
+      <AgentDashboard
+        v-else-if="activePage === 'total'"
+        ref="totalDashboard"
+        :payload="totalPayload"
+        :active-range="totalRange"
+        :status-kind="totalStatusKind"
+        :status-message="totalStatusMessage"
+        :chart-width="chartWidth"
+        :active="activePage === 'total'"
+        empty-title="等待跨 Agent 用量数据"
+        empty-description="启动后三源会自动刷新；也可点击「刷新全部」并行更新 Codex、Cursor、Antigravity。"
+        risk-caption=""
+        @update:active-range="totalRange = $event"
+      />
+
       <section v-else-if="activePage === 'generic'" class="page">
         <div class="empty-panel">
           <FileText :size="36" />
           <h2>通用统计暂未启用</h2>
           <p>后续会支持导入其他模型官网导出的 CSV 或统计文件，并接入大模型分析。第一阶段不实现 API Key 与模型调用。</p>
-        </div>
-      </section>
-
-      <section v-else class="page">
-        <div class="empty-panel">
-          <Layers3 :size="36" />
-          <h2>总计视图等待更多数据源</h2>
-          <p>当 Codex、Cursor、Antigravity 与其他 Agent 适配器接入后，这里会汇总跨来源的 Token、请求、费用和趋势。</p>
         </div>
       </section>
     </main>
@@ -147,10 +161,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Activity, FileText, FolderInput, Layers3, MousePointer2, Orbit, RefreshCw } from "@lucide/vue";
+import { buildTotalStatusKind, buildTotalStatusMessage, mergeAgentPayloads } from "./aggregatePayload";
 import AgentDashboard from "./components/AgentDashboard.vue";
 import { onHostMessage, postToHost } from "./host";
 import { buildAgentStatusMessage } from "./payloadStatus";
 import type { AgentPayload, AgentSource, StatusKind } from "./types";
+
+type DataAgentSource = Exclude<AgentSource, "total">;
 
 const navItems = [
   { id: "codex", label: "Codex", icon: Activity },
@@ -165,8 +182,8 @@ type PageId = (typeof navItems)[number]["id"];
 const activePage = ref<PageId>("codex");
 const statusKind = ref<StatusKind>("idle");
 const statusMessage = ref("等待宿主连接");
-const pageStatuses = ref<Record<AgentSource, StatusKind>>({ codex: "idle", cursor: "idle", antigravity: "idle" });
-const pageMessages = ref<Record<AgentSource, string>>({ codex: "等待数据", cursor: "等待数据", antigravity: "等待数据" });
+const pageStatuses = ref<Record<DataAgentSource, StatusKind>>({ codex: "idle", cursor: "idle", antigravity: "idle" });
+const pageMessages = ref<Record<DataAgentSource, string>>({ codex: "等待数据", cursor: "等待数据", antigravity: "等待数据" });
 
 const codexRootDraft = ref("");
 const antigravityCacheDraft = ref("");
@@ -180,13 +197,19 @@ const antigravityData = ref<AgentPayload | null>(null);
 const codexRange = ref("today");
 const cursorRange = ref("today");
 const antigravityRange = ref("today");
+const totalRange = ref("today");
 
 const sidebarWidth = ref(loadSidebarWidth());
 const workspace = ref<HTMLElement | null>(null);
 const codexDashboard = ref<InstanceType<typeof AgentDashboard> | null>(null);
 const cursorDashboard = ref<InstanceType<typeof AgentDashboard> | null>(null);
 const antigravityDashboard = ref<InstanceType<typeof AgentDashboard> | null>(null);
+const totalDashboard = ref<InstanceType<typeof AgentDashboard> | null>(null);
 const chartWidth = ref(0);
+
+const totalPayload = computed(() => mergeAgentPayloads(codexData.value, cursorData.value, antigravityData.value));
+const totalStatusKind = computed(() => buildTotalStatusKind(pageStatuses.value));
+const totalStatusMessage = computed(() => buildTotalStatusMessage(pageStatuses.value, pageMessages.value));
 let resizeObserver: ResizeObserver | null = null;
 let resizeFrame = 0;
 
@@ -198,11 +221,11 @@ const pageTitle = computed(() => {
   return "跨 Agent 总计";
 });
 
-function pageStatus(source: AgentSource): StatusKind {
+function pageStatus(source: DataAgentSource): StatusKind {
   return pageStatuses.value[source];
 }
 
-function pageMessage(source: AgentSource): string {
+function pageMessage(source: DataAgentSource): string {
   return pageMessages.value[source];
 }
 
@@ -274,7 +297,14 @@ function scheduleChartResize() {
     codexDashboard.value?.scheduleChartResize();
     cursorDashboard.value?.scheduleChartResize();
     antigravityDashboard.value?.scheduleChartResize();
+    totalDashboard.value?.scheduleChartResize();
   });
+}
+
+function refreshAll() {
+  refreshCodex();
+  refreshCursor();
+  refreshAntigravity();
 }
 
 function refreshCodex() {

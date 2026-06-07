@@ -91,8 +91,8 @@
         </article>
       </section>
 
-      <section class="dashboard-grid">
-        <article class="panel wide">
+      <section class="dashboard-grid" :class="{ 'dashboard-grid--no-risk': !showRiskPanel }">
+        <article class="panel wide panel-trend">
           <div class="panel-head">
             <div>
               <h2>Token 趋势</h2>
@@ -101,7 +101,7 @@
           </div>
           <div ref="trendChart" class="chart"></div>
         </article>
-        <article class="panel">
+        <article v-if="showRiskPanel" class="panel panel-risk">
           <div class="panel-head">
             <div>
               <h2>额度与风险</h2>
@@ -119,7 +119,7 @@
             </div>
           </div>
         </article>
-        <article class="panel wide">
+        <article class="panel wide panel-distribution">
           <div class="panel-head">
             <div>
               <h2>调用分布</h2>
@@ -128,7 +128,7 @@
           </div>
           <div ref="distributionChart" class="chart"></div>
         </article>
-        <article class="panel">
+        <article class="panel panel-cost">
           <div class="panel-head">
             <div>
               <h2>费用结构</h2>
@@ -241,6 +241,7 @@ const currentAccountId = computed(() => {
 });
 const effectiveRecords = computed(() => selectedAccount.value?.records ?? props.payload?.records ?? []);
 const hasUsageData = computed(() => effectiveRecords.value.length > 0);
+const showRiskPanel = computed(() => (currentView.value?.risk?.length ?? 0) > 0);
 const showEmptyPanel = computed(() => props.statusKind !== "error" && (!props.payload || !hasUsageData.value));
 const resolvedEmptyDescription = computed(() => {
   if (!props.payload) return props.emptyDescription;

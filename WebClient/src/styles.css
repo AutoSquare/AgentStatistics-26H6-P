@@ -573,7 +573,32 @@ h2 {
 .dashboard-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(320px, 0.8fr);
+  grid-template-areas:
+    "trend risk"
+    "distribution cost";
   gap: 14px;
+}
+
+.dashboard-grid--no-risk {
+  grid-template-areas:
+    "trend trend"
+    "distribution cost";
+}
+
+.panel-trend {
+  grid-area: trend;
+}
+
+.panel-risk {
+  grid-area: risk;
+}
+
+.panel-distribution {
+  grid-area: distribution;
+}
+
+.panel-cost {
+  grid-area: cost;
 }
 
 .panel {
@@ -764,9 +789,24 @@ h2 {
   }
 
   .kpi-grid,
-  .dashboard-grid,
   .tables-grid {
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "trend"
+      "risk"
+      "distribution"
+      "cost";
+  }
+
+  .dashboard-grid--no-risk {
+    grid-template-areas:
+      "trend"
+      "distribution"
+      "cost";
   }
 
   .account-section {

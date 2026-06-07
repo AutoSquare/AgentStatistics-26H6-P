@@ -64,7 +64,7 @@ export interface RiskRow {
   tone: string;
 }
 
-export type AgentSource = "codex" | "cursor" | "antigravity";
+export type AgentSource = "codex" | "cursor" | "antigravity" | "total";
 
 export type AgentDataStatus = "ok" | "empty" | "sync_failed" | "parse_empty";
 
@@ -137,6 +137,7 @@ export interface AgentPayload {
 
 export type CodexView = AgentView;
 export type CodexPayload = AgentPayload & { source: "codex" };
+export type TotalAgentPayload = AgentPayload & { source: "total" };
 
 export interface HostMessage {
   type: string;

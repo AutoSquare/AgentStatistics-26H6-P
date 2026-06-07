@@ -40,6 +40,7 @@ const currentAccountId = computed(() => {
 });
 const effectiveRecords = computed(() => selectedAccount.value?.records ?? props.payload?.records ?? []);
 const hasUsageData = computed(() => effectiveRecords.value.length > 0);
+const showRiskPanel = computed(() => (currentView.value?.risk?.length ?? 0) > 0);
 const showEmptyPanel = computed(() => props.statusKind !== "error" && (!props.payload || !hasUsageData.value));
 const resolvedEmptyDescription = computed(() => {
     if (!props.payload)
@@ -445,9 +446,10 @@ else if (__VLS_ctx.currentView && __VLS_ctx.hasUsageData) {
     (__VLS_ctx.currentView.cost.average.toFixed(2));
     __VLS_asFunctionalElement(__VLS_intrinsicElements.section, __VLS_intrinsicElements.section)({
         ...{ class: "dashboard-grid" },
+        ...{ class: ({ 'dashboard-grid--no-risk': !__VLS_ctx.showRiskPanel }) },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-        ...{ class: "panel wide" },
+        ...{ class: "panel wide panel-trend" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "panel-head" },
@@ -462,40 +464,42 @@ else if (__VLS_ctx.currentView && __VLS_ctx.hasUsageData) {
         ...{ class: "chart" },
     });
     /** @type {typeof __VLS_ctx.trendChart} */ ;
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-        ...{ class: "panel" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "panel-head" },
-    });
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
-    (__VLS_ctx.riskCaption);
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-        ...{ class: "risk-list" },
-    });
-    for (const [risk] of __VLS_getVForSourceType((__VLS_ctx.currentView.risk))) {
+    if (__VLS_ctx.showRiskPanel) {
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
+            ...{ class: "panel panel-risk" },
+        });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            key: (risk.name),
-            ...{ class: "risk-row" },
+            ...{ class: "panel-head" },
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
-        (risk.name);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
-        (risk.note);
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
-        (risk.percentLabel || risk.label);
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.h2, __VLS_intrinsicElements.h2)({});
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.p, __VLS_intrinsicElements.p)({});
+        (__VLS_ctx.riskCaption);
         __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
-            ...{ class: "risk-bar" },
+            ...{ class: "risk-list" },
         });
-        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
-            ...{ style: ({ width: `${Math.min(100, Math.max(0, risk.value || 0))}%` }) },
-        });
+        for (const [risk] of __VLS_getVForSourceType((__VLS_ctx.currentView.risk))) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                key: (risk.name),
+                ...{ class: "risk-row" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({});
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.strong, __VLS_intrinsicElements.strong)({});
+            (risk.name);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({});
+            (risk.note);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+            (risk.percentLabel || risk.label);
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+                ...{ class: "risk-bar" },
+            });
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+                ...{ style: ({ width: `${Math.min(100, Math.max(0, risk.value || 0))}%` }) },
+            });
+        }
     }
     __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-        ...{ class: "panel wide" },
+        ...{ class: "panel wide panel-distribution" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "panel-head" },
@@ -509,7 +513,7 @@ else if (__VLS_ctx.currentView && __VLS_ctx.hasUsageData) {
     });
     /** @type {typeof __VLS_ctx.distributionChart} */ ;
     __VLS_asFunctionalElement(__VLS_intrinsicElements.article, __VLS_intrinsicElements.article)({
-        ...{ class: "panel" },
+        ...{ class: "panel panel-cost" },
     });
     __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
         ...{ class: "panel-head" },
@@ -626,18 +630,22 @@ else if (__VLS_ctx.currentView && __VLS_ctx.hasUsageData) {
 /** @type {__VLS_StyleScopedClasses['dashboard-grid']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['wide']} */ ;
+/** @type {__VLS_StyleScopedClasses['panel-trend']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-head']} */ ;
 /** @type {__VLS_StyleScopedClasses['chart']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel']} */ ;
+/** @type {__VLS_StyleScopedClasses['panel-risk']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-head']} */ ;
 /** @type {__VLS_StyleScopedClasses['risk-list']} */ ;
 /** @type {__VLS_StyleScopedClasses['risk-row']} */ ;
 /** @type {__VLS_StyleScopedClasses['risk-bar']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['wide']} */ ;
+/** @type {__VLS_StyleScopedClasses['panel-distribution']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-head']} */ ;
 /** @type {__VLS_StyleScopedClasses['chart']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel']} */ ;
+/** @type {__VLS_StyleScopedClasses['panel-cost']} */ ;
 /** @type {__VLS_StyleScopedClasses['panel-head']} */ ;
 /** @type {__VLS_StyleScopedClasses['chart']} */ ;
 /** @type {__VLS_StyleScopedClasses['small']} */ ;
@@ -675,6 +683,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             accountOptions: accountOptions,
             sortedAccountOptions: sortedAccountOptions,
             hasUsageData: hasUsageData,
+            showRiskPanel: showRiskPanel,
             showEmptyPanel: showEmptyPanel,
             resolvedEmptyDescription: resolvedEmptyDescription,
             syncMetaLabel: syncMetaLabel,
