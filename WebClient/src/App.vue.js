@@ -130,9 +130,6 @@ function refreshCodex() {
 function refreshCursor() {
     postToHost({ type: "refreshCursor" });
 }
-function openCursorLogin() {
-    postToHost({ type: "openCursorLogin" });
-}
 function refreshAntigravity() {
     postToHost({ type: "refreshAntigravity" });
 }
@@ -317,15 +314,10 @@ else if (__VLS_ctx.activePage === 'cursor') {
         ...{ class: ({ ready: __VLS_ctx.cursorAuthAvailable, cache: !__VLS_ctx.cursorAuthAvailable && __VLS_ctx.cursorLocalCacheAvailable }) },
     });
     (__VLS_ctx.cursorAuthAvailable
-        ? "已连接 Cursor 官网"
+        ? "已连接 Cursor CLI"
         : __VLS_ctx.cursorLocalCacheAvailable
-            ? "未登录官网（仅本地缓存）"
-            : "未检测到 Cursor 登录态");
-    __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
-        ...{ onClick: (__VLS_ctx.openCursorLogin) },
-        ...{ class: "secondary-button" },
-        disabled: (__VLS_ctx.pageStatus('cursor') === 'scanning'),
-    });
+            ? "Cursor CLI 未登录（仅本地缓存）"
+            : "未检测到 Cursor CLI 登录态");
     __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
         ...{ onClick: (__VLS_ctx.refreshCursor) },
         ...{ class: "primary-button" },
@@ -579,7 +571,6 @@ else {
 /** @type {__VLS_StyleScopedClasses['topbar-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['compact-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['auth-hint']} */ ;
-/** @type {__VLS_StyleScopedClasses['secondary-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['primary-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['topbar-actions']} */ ;
 /** @type {__VLS_StyleScopedClasses['path-field']} */ ;
@@ -625,7 +616,6 @@ const __VLS_self = (await import('vue')).defineComponent({
             pageMessage: pageMessage,
             refreshCodex: refreshCodex,
             refreshCursor: refreshCursor,
-            openCursorLogin: openCursorLogin,
             refreshAntigravity: refreshAntigravity,
             saveCodexRoot: saveCodexRoot,
             saveAntigravityCachePath: saveAntigravityCachePath,

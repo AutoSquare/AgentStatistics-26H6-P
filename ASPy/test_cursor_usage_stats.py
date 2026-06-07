@@ -4,19 +4,39 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 import cursor_usage_stats as cursor_stats
+from cursor_usage_api import build_usage_json_document
 
 
 class CursorUsageStatsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.cli_auth_patch = patch("cursor_usage_stats.read_cli_auth_bundle", return_value=None)
+        self.credentials_patch = patch("cursor_usage_stats.ensure_tokscale_credentials", return_value=False)
+        self.cli_auth_patch.start()
+        self.credentials_patch.start()
+
+    def tearDown(self) -> None:
+        self.credentials_patch.stop()
+        self.cli_auth_patch.stop()
+
+    def _online_account(self, account_id: str, email: str) -> dict[str, object]:
+        return {
+            "accountId": account_id,
+            "email": email,
+            "isOnline": True,
+            "updatedAt": datetime.now(timezone.utc).isoformat(),
+        }
+
     def test_enrich_cursor_identity_uses_matching_jwt_subject_email(self) -> None:
         token = "github|user_1%3A%3AeyJhbGciOiJub25lIn0.eyJzdWIiOiJnaXRodWJ8dXNlcl8xIn0."
         equivalent = "user_1%3A%3AeyJhbGciOiJub25lIn0.eyJzdWIiOiJnaXRodWJ8dXNlcl8xIn0."
         with patch(
             "cursor_usage_stats.iter_session_token_candidates",
-            return_value=[{"token": equivalent, "email": "user@example.com", "source": "state.vscdb"}],
+            return_value=[{"token": equivalent, "email": "user@example.com", "source": "cursor-cli"}],
         ):
             enriched = cursor_stats.enrich_cursor_identity({"token": token, "source": "credentials"})
         self.assertIsNotNone(enriched)
@@ -69,7 +89,7 @@ class CursorUsageStatsTests(unittest.TestCase):
                 encoding="utf-8",
             )
             cache_dir.joinpath("usage-account.json").write_text(
-                json.dumps({"accountId": "github|user_test", "email": "user@example.com", "isOnline": True}),
+                json.dumps(self._online_account("github|user_test", "user@example.com")),
                 encoding="utf-8",
             )
             with (
@@ -110,11 +130,11 @@ class CursorUsageStatsTests(unittest.TestCase):
             self.assertEqual(len(payload["accounts"]), 2)
             self.assertEqual(payload["views"]["history"]["summary"]["totalTokens"], 300)
 
-    def test_current_website_account_drives_active_identity(self) -> None:
+    def test_legacy_online_marker_does_not_define_cli_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp)
             cache_dir.joinpath("usage-account.json").write_text(
-                json.dumps({"accountId": "new-account", "email": "new@example.com"}),
+                json.dumps(self._online_account("new-account", "new@example.com")),
                 encoding="utf-8",
             )
             cache_dir.joinpath("usage.csv").write_text(
@@ -127,14 +147,78 @@ class CursorUsageStatsTests(unittest.TestCase):
                 patch("cursor_usage_stats.default_sync_status_path", return_value=cache_dir / "missing-status.json"),
             ):
                 payload = cursor_stats.build_payload(cache_dir, 0, None)
-            self.assertEqual(payload["activeAccountId"], "new-account")
+            self.assertIsNone(payload["activeAccountId"])
             self.assertEqual(payload["accounts"][0]["email"], "new@example.com")
 
-    def test_account_aliases_merge_and_only_current_account_is_online(self) -> None:
+    def test_latest_usage_json_account_overrides_stale_usage_account(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp)
             cache_dir.joinpath("usage-account.json").write_text(
-                json.dumps({"accountId": "github|user_same", "email": "same@example.com"}),
+                json.dumps(self._online_account("user_old", "old@example.com")),
+                encoding="utf-8",
+            )
+            document = build_usage_json_document(
+                [
+                    {
+                        "timestamp": "2026-06-06T00:00:00Z",
+                        "model": "auto",
+                        "tokenUsage": {"inputTokens": 20, "cacheReadTokens": 5, "outputTokens": 8},
+                    }
+                ],
+                source="cursor-json",
+            )
+            document["accountId"] = "user_new"
+            document["email"] = "new@example.com"
+            cache_dir.joinpath("usage.json").write_text(json.dumps(document), encoding="utf-8")
+            with (
+                patch("cursor_usage_stats.probe_cursor_limits", return_value={"ok": False, "usage": None}),
+                patch("cursor_usage_stats.default_sync_status_path", return_value=cache_dir / "missing-status.json"),
+            ):
+                payload = cursor_stats.build_payload(cache_dir, 0, None)
+            self.assertIsNone(payload["activeAccountId"])
+            current = next(item for item in payload["accounts"] if item["id"] == "user_new")
+            self.assertFalse(current["isCurrent"])
+            self.assertEqual(current["email"], "new@example.com")
+
+    def test_cursor_cli_account_drives_current_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            account_dir = cache_dir / "accounts" / "cli"
+            account_dir.mkdir(parents=True)
+            account_dir.joinpath("account.json").write_text(
+                json.dumps({"accountId": "user_cli", "email": "cli@example.com"}),
+                encoding="utf-8",
+            )
+            account_dir.joinpath("usage.csv").write_text(
+                "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost\n"
+                "2026-06-06T00:00:00Z,auto,0,20,5,8,33,0\n",
+                encoding="utf-8",
+            )
+            with (
+                patch(
+                    "cursor_usage_stats.read_cli_auth_bundle",
+                    return_value={
+                        "accountId": "user_cli",
+                        "email": "cli@example.com",
+                        "source": "cursor-cli",
+                        "path": "auth.json",
+                    },
+                ),
+                patch("cursor_usage_stats.probe_cursor_limits", return_value={"ok": False, "usage": None}),
+                patch("cursor_usage_stats.default_sync_status_path", return_value=cache_dir / "missing-status.json"),
+            ):
+                payload = cursor_stats.build_payload(cache_dir, 0, None)
+            self.assertEqual(payload["activeAccountId"], "user_cli")
+            current = next(item for item in payload["accounts"] if item["id"] == "user_cli")
+            self.assertTrue(current["isCurrent"])
+            self.assertTrue(current["isOnline"])
+            self.assertEqual(payload["auth"]["source"], "cursor-cli")
+
+    def test_account_aliases_merge_without_cli_current_account(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            cache_dir.joinpath("usage-account.json").write_text(
+                json.dumps(self._online_account("github|user_same", "same@example.com")),
                 encoding="utf-8",
             )
             for index, account_id in enumerate(("github|user_same", "user_same", "user_old")):
@@ -154,12 +238,12 @@ class CursorUsageStatsTests(unittest.TestCase):
                 patch("cursor_usage_stats.default_sync_status_path", return_value=cache_dir / "missing-status.json"),
             ):
                 payload = cursor_stats.build_payload(cache_dir, 0, None)
-            self.assertEqual(payload["activeAccountId"], "user_same")
+            self.assertIsNone(payload["activeAccountId"])
             self.assertEqual(len(payload["accounts"]), 2)
             current = next(item for item in payload["accounts"] if item["id"] == "user_same")
             old = next(item for item in payload["accounts"] if item["id"] == "user_old")
-            self.assertTrue(current["isCurrent"])
-            self.assertTrue(current["isOnline"])
+            self.assertFalse(current["isCurrent"])
+            self.assertFalse(current["isOnline"])
             self.assertFalse(old["isCurrent"])
             self.assertFalse(old["isOnline"])
 
@@ -190,6 +274,44 @@ class CursorUsageStatsTests(unittest.TestCase):
             self.assertEqual(len(payload["accounts"]), 1)
             self.assertFalse(payload["accounts"][0]["isCurrent"])
             self.assertFalse(payload["accounts"][0]["isOnline"])
+
+    def test_failed_offline_sync_does_not_rewrite_archived_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            account_dir = cache_dir / "accounts" / "old"
+            account_dir.mkdir(parents=True)
+            metadata_path = account_dir / "account.json"
+            history_path = account_dir / "usage.csv"
+            metadata_path.write_text(
+                json.dumps({"accountId": "user_old", "email": "old@example.com"}),
+                encoding="utf-8",
+            )
+            history_path.write_text(
+                "Date,Model,Input (w/ Cache Write),Input (w/o Cache Write),Cache Read,Output Tokens,Total Tokens,Cost\n"
+                "2026-06-06T00:00:00Z,auto,0,10,0,0,10,0\n",
+                encoding="utf-8",
+            )
+            metadata_before = metadata_path.read_bytes()
+            history_before = history_path.read_bytes()
+
+            with (
+                patch(
+                    "cursor_usage_stats.sync_cursor_cache",
+                    return_value={
+                        "synced": False,
+                        "rows": 0,
+                        "error": "未检测到 Cursor CLI 登录态。",
+                    },
+                ),
+                patch("cursor_usage_stats.probe_cursor_limits", return_value={"ok": False, "usage": None}),
+                patch("cursor_usage_stats.default_sync_status_path", return_value=cache_dir / "missing-status.json"),
+            ):
+                payload = cursor_stats.build_payload(cache_dir, 0, None, do_sync=True, force_sync=True)
+
+            self.assertEqual(payload["dataStatus"], "ok")
+            self.assertEqual(payload["views"]["history"]["summary"]["totalTokens"], 10)
+            self.assertEqual(metadata_path.read_bytes(), metadata_before)
+            self.assertEqual(history_path.read_bytes(), history_before)
 
 
 if __name__ == "__main__":

@@ -185,71 +185,82 @@ public static class UserSettingsStore
     }
 
     /// <summary>
-    /// 本机 Cursor IDE globalStorage 数据库路径。
+    /// 获取 Cursor CLI 配置文件路径。
     /// </summary>
-    /// <returns>state.vscdb 路径。</returns>
-    public static string CursorStateDbPath =>
+    public static string CursorCliConfigPath =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".cursor",
+            "cli-config.json");
+
+    /// <summary>
+    /// 获取 Cursor CLI 本地凭据文件路径。
+    /// </summary>
+    public static string CursorCliAuthPath =>
         Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
             "Cursor",
-            "User",
-            "globalStorage",
-            "state.vscdb");
+            "auth.json");
 
     /// <summary>
-    /// 是否可能解析 Cursor 登录态（tokscale 凭证、应用内凭证或本机 state.vscdb）。
+    /// 是否能解析 Cursor CLI 登录态。
     /// </summary>
     /// <returns>存在可用凭证来源时返回 true。</returns>
-    public static bool CanResolveCursorAuth() =>
-        HasCursorSessionToken() || File.Exists(CursorStateDbPath);
+    public static bool CanResolveCursorAuth() => HasCursorCliAuth();
 
     /// <summary>
-    /// 读取已保存的 Cursor Session Token（掩码展示用，不返回明文时可为空）。
+    /// 检查 Cursor CLI 身份配置和访问令牌是否同时存在。
     /// </summary>
-    /// <returns>是否已配置 token。</returns>
-    public static bool HasCursorSessionToken()
-    {
-        var tokscaleCredPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".config",
-            "tokscale",
-            "cursor-credentials.json");
-        if (File.Exists(tokscaleCredPath) && HasTokenInCredentialsFile(tokscaleCredPath))
-            return true;
-
-        var credPath = Path.Combine(AppDataDirectory, "cursor_credentials.json");
-        if (!File.Exists(credPath))
-            return false;
-        return HasTokenInCredentialsFile(credPath);
-    }
-
-    private static bool HasTokenInCredentialsFile(string credPath)
+    /// <returns>Cursor CLI 已登录时返回 true。</returns>
+    public static bool HasCursorCliAuth()
     {
         try
         {
-            using var doc = JsonDocument.Parse(File.ReadAllText(credPath, Encoding.UTF8));
-            var root = doc.RootElement;
-            if (root.TryGetProperty("sessionToken", out var direct) &&
-                direct.ValueKind == JsonValueKind.String &&
-                !string.IsNullOrWhiteSpace(direct.GetString()))
-                return true;
-            if (root.TryGetProperty("accounts", out var accounts) &&
-                root.TryGetProperty("activeAccountId", out var activeId) &&
-                accounts.ValueKind == JsonValueKind.Object &&
-                activeId.ValueKind == JsonValueKind.String &&
-                accounts.TryGetProperty(activeId.GetString()!, out var account) &&
-                account.TryGetProperty("sessionToken", out var token) &&
-                token.ValueKind == JsonValueKind.String &&
-                !string.IsNullOrWhiteSpace(token.GetString()))
-                return true;
-        }
-        catch (JsonException)
-        {
+            using var config = JsonDocument.Parse(File.ReadAllText(CursorCliConfigPath, Encoding.UTF8));
+            using var auth = JsonDocument.Parse(File.ReadAllText(CursorCliAuthPath, Encoding.UTF8));
+            if (!config.RootElement.TryGetProperty("authInfo", out var authInfo)
+                || authInfo.ValueKind != JsonValueKind.Object
+                || !authInfo.TryGetProperty("authId", out var authId)
+                || authId.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(authId.GetString())
+                || !auth.RootElement.TryGetProperty("accessToken", out var accessToken)
+                || accessToken.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(accessToken.GetString()))
+            {
+                return false;
+            }
+
+            var tokenSubject = ReadJwtSubject(accessToken.GetString()!);
+            return !string.IsNullOrWhiteSpace(tokenSubject)
+                   && string.Equals(authId.GetString(), tokenSubject, StringComparison.Ordinal);
         }
         catch (IOException)
         {
+            return false;
         }
-        return false;
+        catch (FormatException)
+        {
+            return false;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static string? ReadJwtSubject(string token)
+    {
+        var parts = token.Split('.');
+        if (parts.Length < 2)
+            return null;
+
+        var payload = parts[1].Replace('-', '+').Replace('_', '/');
+        payload = payload.PadRight(payload.Length + ((4 - payload.Length % 4) % 4), '=');
+        using var document = JsonDocument.Parse(Convert.FromBase64String(payload));
+        return document.RootElement.TryGetProperty("sub", out var subject)
+               && subject.ValueKind == JsonValueKind.String
+            ? subject.GetString()
+            : null;
     }
 
     private static Dictionary<string, object?> ToMutableDictionary(IReadOnlyDictionary<string, JsonElement> settings)

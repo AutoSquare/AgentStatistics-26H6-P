@@ -405,21 +405,57 @@ h2 {
 
 .account-section {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px;
+  grid-template-columns: 220px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 10px;
   margin-bottom: 16px;
+  min-width: 0;
+}
+
+.account-strip {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0 2px 8px;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(30, 64, 175, 0.32) transparent;
+}
+
+.account-strip::-webkit-scrollbar {
+  height: 8px;
+}
+
+.account-strip::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.account-strip::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(30, 64, 175, 0.26);
 }
 
 .account-card {
-  min-height: 112px;
-  padding: 14px 16px;
+  min-height: 96px;
+  padding: 12px 14px;
   border: 1px solid var(--color-border);
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--surface);
   color: var(--text);
   text-align: left;
   cursor: pointer;
   transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.account-card.all-account {
+  width: 100%;
+}
+
+.account-chip {
+  flex: 0 0 266px;
+  scroll-snap-align: start;
 }
 
 .account-card:hover,
@@ -439,11 +475,13 @@ h2 {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
   color: var(--text-muted);
   font-size: 13px;
 }
 
 .account-card .account-name b {
+  flex: 0 0 auto;
   padding: 2px 7px;
   border-radius: 999px;
   background: var(--color-primary);
@@ -451,16 +489,29 @@ h2 {
   font-size: 11px;
 }
 
+.account-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .account-card strong {
   display: block;
-  margin: 9px 0 5px;
-  font-size: 24px;
+  margin: 7px 0 4px;
+  font-size: 22px;
+  line-height: 1.1;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .account-card small {
+  display: block;
   color: var(--text-muted);
   line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .account-card em {
@@ -716,6 +767,14 @@ h2 {
   .dashboard-grid,
   .tables-grid {
     grid-template-columns: 1fr;
+  }
+
+  .account-section {
+    grid-template-columns: 1fr;
+  }
+
+  .account-card.all-account {
+    max-width: 360px;
   }
 }
 

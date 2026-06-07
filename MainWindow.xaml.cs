@@ -27,6 +27,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _cursorAutoSyncTimer;
     private FileSystemWatcher? _codexWatcher;
     private FileSystemWatcher? _cursorWatcher;
+    private FileSystemWatcher? _cursorCliConfigWatcher;
+    private FileSystemWatcher? _cursorCliAuthWatcher;
     private FileSystemWatcher? _antigravityWatcher;
     private readonly List<FileSystemWatcher> _antigravityTranscriptWatchers = new();
     private readonly Dictionary<string, CancellationTokenSource> _scanCtsBySource = new(StringComparer.Ordinal);
@@ -77,9 +79,8 @@ public partial class MainWindow : Window
         await InitializeDashboardAsync().ConfigureAwait(true);
         ConfigureCodexWatcher(_codexSessionsPath);
         ConfigureCursorWatcher(_cursorCachePath);
+        ConfigureCursorCliAuthWatchers();
         ConfigureAntigravityWatcher(_antigravityCachePath);
-        if (!IsCursorWebsiteAuthenticated())
-            _ = Dispatcher.InvokeAsync(OpenCursorLoginAsync);
     }
 
     /// <summary>
@@ -91,6 +92,8 @@ public partial class MainWindow : Window
         CancelAllScans();
         _codexWatcher?.Dispose();
         _cursorWatcher?.Dispose();
+        _cursorCliConfigWatcher?.Dispose();
+        _cursorCliAuthWatcher?.Dispose();
         _antigravityWatcher?.Dispose();
         ClearAntigravityTranscriptWatchers();
         _antigravityAutoSyncTimer.Stop();
@@ -183,6 +186,13 @@ public partial class MainWindow : Window
     /// </summary>
     private async Task OpenCursorLoginAsync()
     {
+        if (_cursorLoginOpen)
+        {
+            CursorLoginOverlay.Visibility = Visibility.Visible;
+            CursorWebSyncLog.Write("cursor login overlay already open; keeping current login navigation");
+            return;
+        }
+
         _cursorLoginOpen = true;
         _cursorAutoSyncTimer.Stop();
         CursorLoginOverlay.Visibility = Visibility.Visible;
@@ -197,9 +207,9 @@ public partial class MainWindow : Window
             CursorLoginWebView.CoreWebView2.Navigate(CursorWebSyncService.DashboardSpendingUrl);
         }
         await CursorWebSyncService.MarkWebsiteSessionOfflineAsync(_cursorCachePath).ConfigureAwait(true);
+        await CursorWebSyncService.MarkWebsiteSyncOfflineAsync(UserSettingsStore.AppDataDirectory).ConfigureAwait(true);
         PostSettings();
-        CursorDashboardAuthService.LaunchDashboardBrowser();
-        CursorWebSyncLog.Write("cursor login overlay opened; cleared app webview session, navigated login webview, and launched system browser");
+        CursorWebSyncLog.Write("cursor login overlay opened; cleared app webview session and navigated login webview");
         _ = CompleteCursorLoginAsync(showFailureMessage: false);
     }
 
@@ -274,7 +284,7 @@ public partial class MainWindow : Window
             if (showFailureMessage)
             {
                 MessageBox.Show(
-                    "仍未检测到 Cursor 官网登录态。\n\n请确认已在系统浏览器中登录 cursor.com（建议打开 spending 页面），然后再次点击「完成登录」。",
+                    "仍未检测到 Cursor 官网登录态。\n\n请在应用内登录窗口完成 cursor.com 登录，并确认已进入 spending 页面，然后再次点击「完成登录」。",
                     "AgentStatistics",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
@@ -297,7 +307,7 @@ public partial class MainWindow : Window
         CancellationToken cancellationToken,
         CoreWebView2? webView = null,
         bool reuseCurrentNavigation = false,
-        bool tryBootstrapCandidates = true,
+        bool tryBootstrapCandidates = false,
         int bootstrapWaitSeconds = 0,
         bool ignoreBackoff = false,
         bool allowLoginOverlay = false)
@@ -500,7 +510,30 @@ public partial class MainWindow : Window
         PostJson(json.ToString());
     }
 
-    private bool IsCursorWebsiteAuthenticated() => TryReadUsageAccountOnline(out _);
+    private bool IsCursorWebsiteAuthenticated() =>
+        UserSettingsStore.HasCursorCliAuth()
+        || (TryReadUsageAccountOnline(out _) && !LastCursorSyncUsedExternalBrowser());
+
+    private static bool LastCursorSyncUsedExternalBrowser()
+    {
+        var path = Path.Combine(UserSettingsStore.AppDataDirectory, "cursor_usage_sync_status.json");
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
+            var root = document.RootElement;
+            return root.TryGetProperty("source", out var source)
+                   && source.ValueKind == JsonValueKind.String
+                   && string.Equals(source.GetString(), "edge-devtools-json", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
 
     private static bool HasCursorLocalCache()
     {
@@ -664,10 +697,6 @@ public partial class MainWindow : Window
 
     private void OnCursorAutoSyncTimerTick(object? sender, EventArgs e)
     {
-        if (_cursorLoginOpen || _cursorWebSyncInProgress)
-            return;
-        if (DateTimeOffset.UtcNow < _cursorWebSyncBackoffUntil)
-            return;
         if (_runningRefresh.Contains("cursor") || _pendingRefresh.Contains("cursor"))
             return;
         QueueCursorRefresh(TimeSpan.FromMilliseconds(1), sync: true, forceFullSync: false);
@@ -714,6 +743,39 @@ public partial class MainWindow : Window
         _cursorAutoSyncTimer.Stop();
         _cursorAutoSyncTimer.Start();
         PostJson("""{"type":"watcher","source":"cursor","active":true,"message":"正在监听 Cursor 用量缓存。"}""");
+    }
+
+    private void ConfigureCursorCliAuthWatchers()
+    {
+        _cursorCliConfigWatcher?.Dispose();
+        _cursorCliAuthWatcher?.Dispose();
+        _cursorCliConfigWatcher = CreateCursorAuthWatcher(UserSettingsStore.CursorCliConfigPath);
+        _cursorCliAuthWatcher = CreateCursorAuthWatcher(UserSettingsStore.CursorCliAuthPath);
+    }
+
+    private FileSystemWatcher? CreateCursorAuthWatcher(string filePath)
+    {
+        var directory = Path.GetDirectoryName(filePath);
+        var fileName = Path.GetFileName(filePath);
+        if (string.IsNullOrWhiteSpace(directory) || string.IsNullOrWhiteSpace(fileName))
+            return null;
+        Directory.CreateDirectory(directory);
+        var watcher = new FileSystemWatcher(directory, fileName)
+        {
+            IncludeSubdirectories = false,
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime,
+            EnableRaisingEvents = true,
+        };
+        void QueueSync() => Dispatcher.Invoke(() =>
+        {
+            _cursorWebSyncBackoffUntil = DateTimeOffset.MinValue;
+            QueueCursorRefresh(TimeSpan.FromMilliseconds(500), sync: true, forceFullSync: true);
+        });
+        watcher.Changed += (_, _) => QueueSync();
+        watcher.Created += (_, _) => QueueSync();
+        watcher.Deleted += (_, _) => QueueSync();
+        watcher.Renamed += (_, _) => QueueSync();
+        return watcher;
     }
 
     private void OnAntigravityAutoSyncTimerTick(object? sender, EventArgs e)
@@ -819,8 +881,8 @@ public partial class MainWindow : Window
                     PostJson("""{"type":"status","source":"codex","status":"idle","message":"已同步 Codex 用量。"}""");
                     break;
                 case "cursor":
-                    var cursorSync = _cursorForceSync && !_cursorLoginOpen;
-                    var cursorForceFullSync = _cursorForceFullSync && !_cursorLoginOpen;
+                    var cursorSync = _cursorForceSync;
+                    var cursorForceFullSync = _cursorForceFullSync;
                     _cursorForceSync = false;
                     _cursorForceFullSync = false;
                     _viewModel.StatusText = "正在扫描 Cursor 用量...";
@@ -834,16 +896,13 @@ public partial class MainWindow : Window
                     PostJson($$"""{"type":"cursorData","payload":{{localPayload}}}""");
 
                     if (cursorSync)
-                    {
-                        PostJson("""{"type":"status","source":"cursor","status":"scanning","message":"已加载本地用量，正在后台同步 Cursor 官网..."}""");
-                        await RunCursorWebSyncOnUiThreadAsync(scanCts.Token).ConfigureAwait(true);
-                    }
+                        PostJson("""{"type":"status","source":"cursor","status":"scanning","message":"已加载本地用量，正在通过 Cursor CLI 同步..."}""");
 
                     var cursorPayload = await _cursorUsageService.GenerateAsync(
                         _cursorCachePath,
                         sync: cursorSync,
                         forceSync: cursorForceFullSync,
-                        skipCloudSync: true,
+                        skipCloudSync: !cursorSync,
                         cancellationToken: scanCts.Token).ConfigureAwait(true);
                     var cursorStatusMessage = BuildCursorStatusMessage(cursorPayload);
                     _viewModel.StatusText = "Cursor 用量统计已刷新";

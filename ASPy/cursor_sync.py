@@ -48,6 +48,20 @@ def derive_account_id(token: str) -> str:
     return "anon-" + digest[:12]
 
 
+def _account_id_from_token(token: str) -> str:
+    if "%3A%3A" in token or "::" in token:
+        return derive_account_id(token)
+    try:
+        from cursor_discover import decode_jwt_sub, derive_dashboard_user_id
+
+        subject = decode_jwt_sub(token)
+        if subject:
+            return derive_dashboard_user_id(subject)
+    except ImportError:
+        pass
+    return derive_account_id(token)
+
+
 def read_credentials(path: Path | None = None) -> str | None:
     candidates = [path, tokscale_credentials_path(), app_credentials_path()]
     for file in candidates:
@@ -246,8 +260,19 @@ def _attach_auth_metadata(result: dict[str, Any], origin: dict[str, Any] | None)
     return result
 
 
-def _save_usage_json(cache_dir: Path, events: list[dict[str, Any]], *, source: str) -> dict[str, Any]:
+def _save_usage_json(
+    cache_dir: Path,
+    events: list[dict[str, Any]],
+    *,
+    source: str,
+    account_id: str | None = None,
+    email: str | None = None,
+) -> dict[str, Any]:
     document = build_usage_json_document(events, source=source)
+    if account_id:
+        document["accountId"] = account_id
+    if email:
+        document["email"] = email
     path = write_usage_json(cache_dir, document)
     return {
         "synced": True,
@@ -271,8 +296,8 @@ def sync_cursor_cache(
         return {
             "synced": False,
             "rows": 0,
-            "engine": "webview-pending",
-            "error": "本地缓存为空。请在本机浏览器登录 cursor.com/dashboard，或由应用内 WebView2 完成同步。",
+            "engine": "local-cache-empty",
+            "error": "本地缓存为空。请先在 Cursor CLI 完成登录并联网同步。",
         }
 
     json_path = default_usage_json_path(cache_dir)
@@ -295,7 +320,7 @@ def sync_cursor_cache(
         return {
             "synced": False,
             "rows": 0,
-            "error": "未检测到 Cursor 登录态。请在本机 Cursor 完成登录，或保存 WorkosCursorSessionToken 凭证。",
+            "error": "未检测到 Cursor CLI 登录态。请先在 Cursor CLI 完成登录。",
         }
 
     origin: dict[str, Any] | None = None
@@ -306,7 +331,13 @@ def sync_cursor_cache(
         origin = candidate
         try:
             events = fetch_usage_json(token)
-            result = _save_usage_json(cache_dir, events, source="cursor-json")
+            result = _save_usage_json(
+                cache_dir,
+                events,
+                source="cursor-json",
+                account_id=_account_id_from_token(token),
+                email=str((candidate or {}).get("email") or "").strip() or None,
+            )
             return _attach_auth_metadata(result, origin)
         except RuntimeError as exc:
             last_error = str(exc)

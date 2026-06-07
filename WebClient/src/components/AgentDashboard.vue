@@ -17,7 +17,7 @@
 
     <section v-if="accountOptions.length" class="account-section" aria-label="Cursor 账号用量">
       <button
-        class="account-card"
+        class="account-card all-account"
         :class="{ active: selectedAccountId === 'all' }"
         type="button"
         @click="selectedAccountId = 'all'"
@@ -26,25 +26,28 @@
         <strong>{{ allAccountsView?.summary.totalTokensLabel ?? "0" }}</strong>
         <small>{{ allAccountsView?.summary.requestsLabel ?? "0" }} 次调用 · ${{ (allAccountsView?.cost.total ?? 0).toFixed(2) }}</small>
       </button>
-      <button
-        v-for="account in accountOptions"
-        :key="account.id"
-        class="account-card"
-        :class="{ active: selectedAccountId === account.id }"
-        type="button"
-        @click="selectedAccountId = account.id"
-      >
-        <span class="account-name">
-          {{ account.label }}
-          <b v-if="account.isCurrent">当前</b>
-          <b v-else>离线</b>
-        </span>
-        <strong>{{ account.views[activeRange]?.summary.totalTokensLabel ?? "0" }}</strong>
-        <small>
-          ID …{{ account.idSuffix }} · {{ account.views[activeRange]?.summary.requestsLabel ?? "0" }} 次调用
-          <em v-if="account.isOnline && account.syncStatus !== 'ok'">同步异常</em>
-        </small>
-      </button>
+      <div class="account-strip" aria-label="Cursor 账号列表">
+        <button
+          v-for="account in sortedAccountOptions"
+          :key="account.id"
+          class="account-card account-chip"
+          :class="{ active: selectedAccountId === account.id }"
+          type="button"
+          @click="selectedAccountId = account.id"
+        >
+          <span class="account-name">
+            <span class="account-label">{{ account.label }}</span>
+            <b v-if="account.isCurrent">当前</b>
+            <b v-else-if="payload?.activeAccountId === account.id">同步</b>
+            <b v-else>离线</b>
+          </span>
+          <strong>{{ account.views[activeRange]?.summary.totalTokensLabel ?? "0" }}</strong>
+          <small>
+            ID …{{ account.idSuffix }} · {{ account.views[activeRange]?.summary.requestsLabel ?? "0" }} 次调用
+            <em v-if="account.isOnline && account.syncStatus !== 'ok'">同步异常</em>
+          </small>
+        </button>
+      </div>
     </section>
 
     <div v-if="showEmptyPanel" class="empty-panel">
@@ -213,6 +216,7 @@ const trendChart = ref<HTMLElement | null>(null);
 const distributionChart = ref<HTMLElement | null>(null);
 const costChart = ref<HTMLElement | null>(null);
 const selectedAccountId = ref("all");
+const lastActiveAccountId = ref<string | null>(null);
 let trendInstance: echarts.ECharts | null = null;
 let distributionInstance: echarts.ECharts | null = null;
 let costInstance: echarts.ECharts | null = null;
@@ -220,7 +224,21 @@ let resizeObserver: ResizeObserver | null = null;
 let resizeFrame = 0;
 
 const accountOptions = computed<CursorAccountUsage[]>(() => props.payload?.accounts ?? []);
+const sortedAccountOptions = computed<CursorAccountUsage[]>(() =>
+  accountOptions.value
+    .map((account, index) => ({ account, index }))
+    .sort((left, right) => {
+      if (left.account.isCurrent !== right.account.isCurrent) return left.account.isCurrent ? -1 : 1;
+      return left.index - right.index;
+    })
+    .map((item) => item.account)
+);
 const selectedAccount = computed(() => accountOptions.value.find((item) => item.id === selectedAccountId.value) ?? null);
+const currentAccountId = computed(() => {
+  const activeAccountId = props.payload?.activeAccountId;
+  if (activeAccountId && accountOptions.value.some((item) => item.id === activeAccountId)) return activeAccountId;
+  return accountOptions.value.find((item) => item.isCurrent)?.id ?? null;
+});
 const effectiveRecords = computed(() => selectedAccount.value?.records ?? props.payload?.records ?? []);
 const hasUsageData = computed(() => effectiveRecords.value.length > 0);
 const showEmptyPanel = computed(() => props.statusKind !== "error" && (!props.payload || !hasUsageData.value));
@@ -287,12 +305,20 @@ watch(chartView, tryRenderCharts, { immediate: true });
 watch(() => props.active, tryRenderCharts, { immediate: true });
 
 watch(
-  () => props.payload?.activeAccountId,
-  () => {
-    if (selectedAccountId.value !== "all" && !accountOptions.value.some((item) => item.id === selectedAccountId.value)) {
-      selectedAccountId.value = "all";
+  currentAccountId,
+  (accountId) => {
+    const selectedExists = selectedAccountId.value === "all" || accountOptions.value.some((item) => item.id === selectedAccountId.value);
+    if (!accountId) {
+      if (!selectedExists) selectedAccountId.value = "all";
+      lastActiveAccountId.value = null;
+      return;
     }
-  }
+    if (!selectedExists || lastActiveAccountId.value !== accountId) {
+      selectedAccountId.value = accountId;
+    }
+    lastActiveAccountId.value = accountId;
+  },
+  { immediate: true }
 );
 
 watch(

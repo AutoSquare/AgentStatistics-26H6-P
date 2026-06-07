@@ -975,6 +975,27 @@ public sealed class CursorWebSyncService
     public static Task MarkWebsiteSessionOfflineAsync(string cacheDir, CancellationToken cancellationToken = default) =>
         WriteUsageAccountAsync(cacheDir, null, null, false, cancellationToken);
 
+    /// <summary>
+    /// 用户主动切换账号时清除上次云端同步状态，避免沿用外部浏览器来源的伪在线标记。
+    /// </summary>
+    /// <param name="appDataDir">AgentStatistics AppData 目录。</param>
+    /// <param name="cancellationToken">取消标记。</param>
+    public static Task MarkWebsiteSyncOfflineAsync(string appDataDir, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(appDataDir))
+            return Task.CompletedTask;
+        var path = Path.Combine(appDataDir, UsageSyncStatusFileName);
+        try
+        {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+        catch (IOException)
+        {
+        }
+        return Task.CompletedTask;
+    }
+
     private static int CountCsvRows(string? csv)
     {
         if (string.IsNullOrWhiteSpace(csv))

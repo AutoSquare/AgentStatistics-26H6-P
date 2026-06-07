@@ -9,7 +9,7 @@ AgentStatistics 是一个面向 Windows 桌面的本地 AI Agent 用量统计工
 | 能力 | 说明 |
 | --- | --- |
 | Codex 用量监测 | 扫描本机 Codex sessions JSONL 日志，聚合请求数、模型、Token 类型与时间范围视图。 |
-| Cursor 用量监测 | 解析官网 Dashboard 导出的 `usage.json` / tokscale `cursor-cache` CSV，通过 WebView2 或已登录 Edge DevTools 同源上下文同步用量与 usage-summary 额度；按账号隔离历史、合并官网与本地记录，并支持全部账号或单账号查看。 |
+| Cursor 用量监测 | 仅复用 Cursor CLI 登录态，通过内置同步链拉取 `usage.json` 与 usage-summary 额度；不读取 Cursor 桌面 IDE、浏览器或 Edge。按账号隔离历史、合并云端与本地记录，并支持全部账号或单账号查看。 |
 | Antigravity 用量监测 | 读取 `antigravity-cache/sessions/*.jsonl` 与 `~/.gemini/antigravity-cli` transcript；刷新时从运行中 CLI（agy）经 Connect RPC 同步；可选配额风险面板。 |
 | 趋势可视化 | 使用 Vue、Vite 和 ECharts 展示 Token 趋势、调用分布、费用结构和风险状态。 |
 | 本地路径配置 | 支持在界面中配置 Codex sessions 路径，并通过 WPF 监听日志变化触发刷新。 |
@@ -77,7 +77,7 @@ dotnet run
 - 会话 / 项目排行、模型排行；
 - 当前范围 CSV 导出。
 
-Cursor 页使用相同的时间范围和统计视图，并在时间范围下方显示账号卡片。不同账号的用量相加形成“全部账号”总计；选择单个账号后，KPI、趋势、排行和 CSV 导出均切换到该账号。`github|user_*` 与 `user_*` 会规范化为同一账号；一次只有通过 `https://cursor.com/cn/dashboard/spending` 的 `/api/auth/me` 验证的当前账号在线并参与同步，其他账号仅保留历史数据。“登录 / 切换账号”会先清除应用自身的旧 Cursor Cookie，再打开应用内登录 WebView 和系统浏览器；应用内 WebView 登录成功后会直接验证官网账号。若 Edge 已登录 Cursor 且以 `--remote-debugging-port=9222` 打开，刷新会在 WebView 会话被拒绝后通过 Edge DevTools 同源上下文同步，解决 Chromium v20 app-bound Cookie 无法直接导入 WebView2 的场景。
+Cursor 页使用相同的时间范围和统计视图，并在时间范围下方显示固定“全部账号”总览卡与横向滚动账号胶囊条。Cursor CLI 登录态由 `~/.cursor/cli-config.json` 与 `%APPDATA%/Cursor/auth.json` 识别，CLI 当前账号排在具体账号列表第一位。Cursor 模块不读取桌面 IDE `state.vscdb`、浏览器 Cookie 或 Edge，也不提供网页登录入口。离线时可继续读取最近一次本地缓存；刷新完整用量和额度需要访问 Cursor API。
 
 ## 项目结构
 
@@ -103,7 +103,7 @@ AgentStatistics/
 - Codex 统计只提取 Token 数、模型名、时间戳、会话标识、cwd basename、rate limit、耗时和失败状态等元数据。
 - 本项目不读取、不展示、不导出提示词、助手正文、工具输出和文件内容。
 - 本地业务数据默认写入 `%AppData%\AgentStatistics\`，包括 `session_snapshot.json`、`user_settings.json` 和 Codex 用量缓存。
-- Cursor 官网完整快照按账号归档到 `cursor-cache/accounts/<account-hash>/`。当前账号以 Dashboard `/api/auth/me` 为准，旧版无账号 `usage.csv` 首次迁移时归入当前登录账号；JSON 分页未拉全时回退官网 CSV 导出，两个来源都失败才保留上一次完整快照。
+- Cursor 完整快照按账号归档到 `cursor-cache/accounts/<account-hash>/`。当前账号以 Cursor CLI 的 `authInfo.authId` 为准；JSON 分页未拉全时回退 API CSV 导出，两个来源都失败才保留上一次完整快照。
 - 费用展示为基于本地规则的估算结果，不等同于服务商官方账单。
 
 ## 品牌与资源

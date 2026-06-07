@@ -10,14 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from cursor_auth import normalize_session_token
-from cursor_discover import read_ide_access_token
+from cursor_cli_auth import read_cli_auth_bundle
 from cursor_http import request_json, request_usage_for_user
-from cursor_ide_api import probe_ide_limits
+from cursor_cli_api import probe_cli_limits
 from usage_common import quota_risk_row, reset_time_label
 
 LIMITS_CACHE_VERSION = 1
-WEBVIEW_SUMMARY_MAX_AGE_SEC = 300
-
 USAGE_SUMMARY_URL = "https://cursor.com/api/usage-summary"
 AUTH_ME_URL = "https://cursor.com/api/auth/me"
 REQUEST_USAGE_URL = "https://cursor.com/api/usage"
@@ -142,12 +140,6 @@ def parse_usage_summary(summary: dict[str, Any], request_usage: dict[str, Any] |
     }
 
 
-def default_webview_summary_path() -> Path:
-    appdata = os.getenv("APPDATA")
-    base = Path(appdata) if appdata else Path.home() / ".agentstatistics"
-    return base / "AgentStatistics" / "cursor_web_usage_summary.json"
-
-
 def default_limits_cache_path() -> Path:
     appdata = os.getenv("APPDATA")
     base = Path(appdata) if appdata else Path.home() / ".agentstatistics"
@@ -156,33 +148,6 @@ def default_limits_cache_path() -> Path:
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-
-def load_webview_summary_probe(max_age_sec: int = WEBVIEW_SUMMARY_MAX_AGE_SEC) -> dict[str, Any] | None:
-    path = default_webview_summary_path()
-    if not path.is_file():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    fetched_at = payload.get("fetchedAt") if isinstance(payload.get("fetchedAt"), str) else None
-    age = _cache_age_seconds(fetched_at)
-    if age is None or age > max_age_sec:
-        return None
-    summary = payload.get("summary")
-    if not isinstance(summary, dict):
-        return None
-    usage = parse_usage_summary(summary, None)
-    usage["source"] = "usage-summary"
-    return {
-        "ok": True,
-        "usage": usage,
-        "cachedAt": fetched_at,
-        "sourceNote": "Cursor usage-summary（Dashboard）",
-    }
 
 
 def load_limits_cache(cache_path: Path | None) -> dict[str, Any] | None:
@@ -287,20 +252,13 @@ def probe_cursor_limits(
     *,
     max_cache_age_sec: int = 0,
 ) -> dict[str, Any]:
-    webview_summary = load_webview_summary_probe(
-        max_age_sec=max_cache_age_sec if max_cache_age_sec > 0 else WEBVIEW_SUMMARY_MAX_AGE_SEC
-    )
-    if webview_summary:
-        save_limits_cache(cache_path, webview_summary)
-        return webview_summary
-
     if max_cache_age_sec > 0:
         cached = load_limits_cache(cache_path)
         if cached:
             age = _cache_age_seconds(cached.get("cachedAt"))
             if age is not None and age <= max_cache_age_sec:
                 usage = cached["usage"] if isinstance(cached.get("usage"), dict) else {}
-                source_note = "Cursor IDE API（本地缓存）" if usage.get("source") == "ide-api" else "本地额度缓存"
+                source_note = "Cursor CLI API（本地缓存）" if usage.get("source") == "cli-api" else "本地额度缓存"
                 if usage.get("source") == "usage-summary":
                     source_note = "Cursor usage-summary（本地缓存）"
                 return {
@@ -326,17 +284,22 @@ def probe_cursor_limits(
         if probe_kind == "vercel_checkpoint":
             saw_vercel = True
 
-    access_token = read_ide_access_token()
+    cli_auth = read_cli_auth_bundle()
+    access_token = str((cli_auth or {}).get("accessToken") or "").strip()
     if access_token:
-        ide_live = probe_ide_limits(access_token)
-        if ide_live.get("ok"):
-            save_limits_cache(cache_path, ide_live)
+        cli_live = probe_cli_limits(access_token)
+        if cli_live.get("ok"):
+            cli_live["usage"]["email"] = cli_auth.get("email")
+            cli_live["usage"]["accountId"] = cli_auth.get("accountId")
+            cli_live["usage"]["source"] = "cli-api"
+            cli_live["cliApi"] = True
+            save_limits_cache(cache_path, cli_live)
             if saw_vercel:
-                ide_live["probeError"] = probe_error
-                ide_live["probeErrorKind"] = "vercel_checkpoint"
-            return ide_live
-        probe_error = str(ide_live.get("error") or probe_error)
-        probe_kind = ide_live.get("errorKind") or probe_kind
+                cli_live["probeError"] = probe_error
+                cli_live["probeErrorKind"] = "vercel_checkpoint"
+            return cli_live
+        probe_error = str(cli_live.get("error") or probe_error)
+        probe_kind = cli_live.get("errorKind") or probe_kind
 
     cached = load_limits_cache(cache_path)
     if cached:
@@ -358,22 +321,22 @@ def _limits_source_note(limits_data: dict[str, Any] | None, fallback: str) -> st
         return limits_data["sourceNote"].strip()
     usage = limits_data.get("usage") if isinstance(limits_data.get("usage"), dict) else {}
     if limits_data.get("cacheFresh"):
-        if usage.get("source") == "ide-api":
-            return "Cursor IDE API（本地缓存）"
+        if usage.get("source") == "cli-api":
+            return "Cursor CLI API（本地缓存）"
         return "本地额度缓存"
-    if usage.get("source") == "ide-api" or limits_data.get("ideApi"):
-        return "Cursor IDE API（api2.cursor.sh）"
+    if usage.get("source") == "cli-api" or limits_data.get("cliApi"):
+        return "Cursor CLI API（api2.cursor.sh）"
     if limits_data.get("cached") and limits_data.get("probeError"):
-        if usage.get("source") == "ide-api":
-            return "Cursor IDE API（本地缓存）"
+        if usage.get("source") == "cli-api":
+            return "Cursor CLI API（本地缓存）"
         error = str(limits_data.get("probeError") or "API 暂不可用")
         cached_at = limits_data.get("cachedAt")
         if cached_at:
             return f"缓存额度 · {error} · {cached_at}"
         return f"缓存额度 · {error}"
     if limits_data.get("cached"):
-        if usage.get("source") == "ide-api":
-            return "Cursor IDE API（本地缓存）"
+        if usage.get("source") == "cli-api":
+            return "Cursor CLI API（本地缓存）"
         return "本地额度缓存"
     return fallback
 

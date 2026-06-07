@@ -42,10 +42,36 @@ class AntigravitySyncTests(unittest.TestCase):
     def test_sync_without_running_ide_reports_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             cache_dir = Path(tmp)
+            sessions_dir = cache_dir / "sessions"
+            sessions_dir.mkdir(parents=True)
+            artifact_path = sessions_dir / "saved.jsonl"
+            artifact_path.write_text('{"type":"usage","sessionId":"saved"}\n', encoding="utf-8")
+            manifest_path = cache_dir / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "sessions": [
+                            {
+                                "sessionId": "saved",
+                                "artifactPath": "sessions/saved.jsonl",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            artifact_before = artifact_path.read_bytes()
+            manifest_before = manifest_path.read_bytes()
+
             with patch("antigravity_sync.detect_connections", return_value=[]):
                 result = sync.sync_antigravity_cache(cache_dir)
-            self.assertFalse(result.get("synced"))
+
+            self.assertTrue(result.get("synced"))
             self.assertIn("未运行", str(result.get("error") or ""))
+            self.assertEqual(result.get("sessions"), 1)
+            self.assertEqual(artifact_path.read_bytes(), artifact_before)
+            self.assertEqual(manifest_path.read_bytes(), manifest_before)
 
 
     def test_sync_keeps_successful_artifacts_when_later_rpc_fails(self) -> None:

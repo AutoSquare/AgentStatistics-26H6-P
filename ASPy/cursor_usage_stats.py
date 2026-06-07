@@ -8,18 +8,17 @@ import json
 import os
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from cursor_auth import normalize_session_token
-from cursor_discover import decode_jwt_sub, iter_session_token_candidates
+from cursor_cli_auth import read_cli_auth_bundle
+from cursor_discover import build_workos_session_token, decode_jwt_sub, iter_session_token_candidates
 from cursor_limits import build_cursor_risk_rows, default_limits_cache_path, probe_cursor_limits
 from cursor_sync import (
     derive_account_id,
     ensure_tokscale_credentials,
     sync_cursor_cache,
-    tokscale_credentials_path,
-    write_credentials,
 )
 from cursor_sync import _count_csv_rows as count_usage_csv_rows
 from tokscale_csv import (
@@ -41,6 +40,7 @@ CURSOR_PRICING_RULES = [
     {"label": "cursor-auto", "patterns": ["cursor-auto", "auto"], "input": 2.00, "cached": 0.20, "output": 8.00},
     {"label": "o3", "patterns": ["o3-mini", "o3"], "input": 1.10, "cached": 0.55, "output": 4.40},
 ]
+USAGE_ACCOUNT_ONLINE_TTL_SEC = 600
 
 
 def _account_store_dir(cache_dir: Path) -> Path:
@@ -64,6 +64,20 @@ def _account_folder(cache_dir: Path, account_id: str) -> Path:
 
 def _current_usage_account(cache_dir: Path) -> dict[str, Any] | None:
     return _read_json_object(cache_dir / "usage-account.json")
+
+
+def _usage_account_is_recent(account: dict[str, Any]) -> bool:
+    updated_at = str(account.get("updatedAt") or "").strip()
+    if not updated_at:
+        return False
+    try:
+        parsed = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+    return 0 <= age <= USAGE_ACCOUNT_ONLINE_TTL_SEC
 
 
 def _read_json_object(path: Path) -> dict[str, Any] | None:
@@ -117,7 +131,7 @@ def archive_current_account_sources(
     current_account = _current_usage_account(cache_dir) or {}
     stored_account = normalize_cursor_account_id((usage_document or {}).get("accountId"))
     declared_account = normalize_cursor_account_id(current_account.get("accountId"))
-    effective_account = declared_account or stored_account or normalize_cursor_account_id(account_id)
+    effective_account = stored_account or declared_account or normalize_cursor_account_id(account_id)
     if not effective_account:
         return
 
@@ -129,9 +143,8 @@ def archive_current_account_sources(
         "version": 1,
         "accountId": effective_account,
         "email": (
-            current_account.get("email")
-            or
             (usage_document or {}).get("email")
+            or current_account.get("email")
             or (email if effective_account == account_id else None)
             or existing.get("email")
         ),
@@ -141,7 +154,7 @@ def archive_current_account_sources(
         encoding="utf-8",
     )
 
-    if usage_document and usage_path.is_file() and (not declared_account or stored_account == declared_account):
+    if usage_document and usage_path.is_file() and (not declared_account or stored_account == declared_account or stored_account == effective_account):
         shutil.copy2(usage_path, account_dir / "usage.json")
 
     legacy_csv = cache_dir / "usage.csv"
@@ -261,41 +274,51 @@ def build_payload(
     cache_dir: Path,
     days: int,
     cache_path: Path | None,
-    session_token: str | None = None,
     do_sync: bool = False,
     force_sync: bool = False,
     skip_cloud: bool = False,
 ) -> dict[str, Any]:
-    normalized_token = normalize_session_token(session_token) if session_token else None
+    cli_auth = read_cli_auth_bundle() or {}
+    cli_session_token = build_workos_session_token(
+        str(cli_auth.get("accessToken") or ""),
+        str(cli_auth.get("subject") or ""),
+    )
     resolved = enrich_cursor_identity(
-        {"token": normalized_token, "source": "argument"} if normalized_token else None
+        {
+            "token": cli_session_token,
+            "source": "cursor-cli",
+            "email": cli_auth.get("email"),
+            "accountId": cli_auth.get("accountId"),
+            "path": cli_auth.get("path"),
+        }
+        if cli_session_token
+        else None
     )
     sync_result: dict[str, Any] | None = None
     if do_sync:
-        ensure_tokscale_credentials(normalized_token)
-    if do_sync and normalized_token:
-        write_credentials(normalized_token, tokscale_credentials_path())
-        sync_result = sync_cursor_cache(
-            cache_dir,
-            normalized_token,
-            force=force_sync,
-            skip_cloud=skip_cloud,
-        )
-        if sync_result.get("synced") and sync_result.get("path"):
-            invalidate_parse_cache_entries(cache_path, sync_result["path"], cache_dir / "usage.json")
-    elif do_sync:
+        ensure_tokscale_credentials()
         sync_result = sync_cursor_cache(cache_dir, force=force_sync, skip_cloud=skip_cloud)
         if sync_result.get("synced") and sync_result.get("path"):
             invalidate_parse_cache_entries(cache_path, sync_result["path"], cache_dir / "usage.json")
 
     current_usage_account = _current_usage_account(cache_dir) or {}
-    current_online = current_usage_account.get("isOnline") is not False
-    token = resolved.get("token") if resolved and current_online else None
-    account_id = normalize_cursor_account_id(current_usage_account.get("accountId")) if current_online else ""
-    if not account_id and current_online:
+    usage_document = _read_json_object(cache_dir / "usage.json") or {}
+    synced_account_id = normalize_cursor_account_id(usage_document.get("accountId"))
+    cli_account_id = normalize_cursor_account_id(cli_auth.get("accountId"))
+    verified_account_id = cli_account_id
+    current_online = bool(verified_account_id)
+    token = resolved.get("token") if resolved else None
+    legacy_account_id = normalize_cursor_account_id(current_usage_account.get("accountId"))
+    account_id = cli_account_id or synced_account_id or legacy_account_id
+    if not account_id and resolved:
         account_id = normalize_cursor_account_id(derive_account_id(str(token))) if token else ""
-    account_email = str(current_usage_account.get("email") or "").strip() if current_online else ""
-    if not account_email and current_online:
+    account_email = str(
+        (cli_auth.get("email") if account_id == cli_account_id else None)
+        or usage_document.get("email")
+        or current_usage_account.get("email")
+        or ""
+    ).strip()
+    if not account_email:
         account_email = str(resolved.get("email") or "").strip() if resolved else ""
     if account_id:
         archive_current_account_sources(cache_dir, account_id, account_email or None)
@@ -306,7 +329,7 @@ def build_payload(
     limits_probe = probe_cursor_limits(
         token,
         limits_cache_path,
-        max_cache_age_sec=300 if do_sync else 0,
+        max_cache_age_sec=0,
     )
     loaded["limits"] = limits_probe
 
@@ -327,8 +350,8 @@ def build_payload(
             {
                 "metric": "真实额度",
                 "source": (
-                    "Cursor IDE API"
-                    if limits_probe.get("ideApi")
+                    "Cursor CLI API"
+                    if limits_probe.get("cliApi")
                     else "Cursor usage-summary API"
                     if not limits_probe.get("cached")
                     else "本地额度缓存"
@@ -377,8 +400,8 @@ def build_payload(
                 "email": email or None,
                 "label": email or f"Cursor 账号 · {identity[-8:]}",
                 "idSuffix": identity[-8:],
-                "isCurrent": identity == account_id,
-                "isOnline": current_online and identity == account_id,
+                "isCurrent": identity == verified_account_id,
+                "isOnline": identity == verified_account_id,
                 "syncStatus": account_sync_status if account_sync_status in {"ok", "partial", "error"} else "error",
                 "syncMessage": sync_status.get("message") if account_sync_status != "ok" else None,
                 "views": account_payload["views"],
@@ -386,7 +409,7 @@ def build_payload(
             }
         )
     payload["accounts"] = account_payloads
-    payload["activeAccountId"] = account_id or None
+    payload["activeAccountId"] = verified_account_id or None
     payload["syncAttempted"] = do_sync
     if sync_result is not None:
         payload["sync"] = sync_result
@@ -407,6 +430,12 @@ def build_payload(
             "email": resolved.get("email"),
             "path": resolved.get("path"),
         }
+    elif cli_auth:
+        payload["auth"] = {
+            "source": "cursor-cli",
+            "email": cli_auth.get("email"),
+            "path": cli_auth.get("path"),
+        }
     return payload
 
 
@@ -421,18 +450,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--skip-cloud-sync",
         action="store_true",
-        help="skip Python HTTP sync; read WebView2-written local cache only",
+        help="skip Cursor API sync and read the local cache only",
     )
-    parser.add_argument("--token", default="", help="Cursor WorkosCursorSessionToken")
     args = parser.parse_args(argv)
     cache = None if args.no_cache else Path(args.cache)
-    token = normalize_session_token(args.token.strip()) if args.token.strip() else None
     payload = build_payload(
         Path(args.cache_dir),
         args.days,
         cache,
-        token,
-        args.sync or bool(token),
+        args.sync,
         force_sync=args.force_sync,
         skip_cloud=args.skip_cloud_sync,
     )

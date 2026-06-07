@@ -27,8 +27,8 @@ class CursorLimitsTests(unittest.TestCase):
             )
             with (
                 patch("cursor_limits._probe_live", return_value={"ok": False, "usage": None, "error": "Cursor usage-summary 请求失败"}),
-                patch("cursor_limits.read_ide_access_token", return_value=None),
-                patch("cursor_limits.probe_ide_limits", return_value={"ok": False, "usage": None, "error": "IDE API 不可用"}),
+                patch("cursor_limits.read_cli_auth_bundle", return_value=None),
+                patch("cursor_limits.probe_cli_limits", return_value={"ok": False, "usage": None, "error": "CLI API 不可用"}),
             ):
                 result = probe_cursor_limits("token", cache_path)
 
@@ -46,16 +46,28 @@ class CursorLimitsTests(unittest.TestCase):
         self.assertTrue(result.get("cacheFresh"))
         live_mock.assert_not_called()
 
-    def test_probe_limits_falls_back_to_ide_api(self) -> None:
-        with patch("cursor_limits._probe_live", return_value={"ok": False, "usage": None, "error": "blocked", "errorKind": "vercel_checkpoint"}):
-            with patch("cursor_limits.read_ide_access_token", return_value="ide-token"):
+    def test_probe_limits_prefers_cli_api(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_path = Path(tmp) / "limits_cache.json"
+            with patch("cursor_limits._probe_live", return_value={"ok": False, "usage": None, "error": "blocked"}):
                 with patch(
-                    "cursor_limits.probe_ide_limits",
-                    return_value={"ok": True, "usage": {"planPercent": 12.0, "source": "ide-api"}, "ideApi": True},
+                    "cursor_limits.read_cli_auth_bundle",
+                    return_value={
+                        "accessToken": "cli-token",
+                        "accountId": "user_cli",
+                        "email": "cli@example.com",
+                    },
                 ):
-                    result = probe_cursor_limits("token", None)
+                    with patch(
+                        "cursor_limits.probe_cli_limits",
+                        return_value={"ok": True, "usage": {"planPercent": 12.0, "source": "cli-api"}, "cliApi": True},
+                    ) as probe:
+                        result = probe_cursor_limits("token", cache_path)
+        probe.assert_called_once_with("cli-token")
         self.assertTrue(result["ok"])
-        self.assertTrue(result["ideApi"])
+        self.assertTrue(result["cliApi"])
+        self.assertEqual(result["usage"]["source"], "cli-api")
+        self.assertEqual(result["usage"]["accountId"], "user_cli")
 
     def test_save_and_load_limits_cache_roundtrip(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

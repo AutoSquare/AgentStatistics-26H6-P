@@ -53,15 +53,12 @@
           <p class="auth-hint" :class="{ ready: cursorAuthAvailable, cache: !cursorAuthAvailable && cursorLocalCacheAvailable }">
             {{
               cursorAuthAvailable
-                ? "已连接 Cursor 官网"
+                ? "已连接 Cursor CLI"
                 : cursorLocalCacheAvailable
-                  ? "未登录官网（仅本地缓存）"
-                  : "未检测到 Cursor 登录态"
+                  ? "Cursor CLI 未登录（仅本地缓存）"
+                  : "未检测到 Cursor CLI 登录态"
             }}
           </p>
-          <button class="secondary-button" :disabled="pageStatus('cursor') === 'scanning'" @click="openCursorLogin">
-            登录 / 切换账号
-          </button>
           <button class="primary-button" :disabled="pageStatus('cursor') === 'scanning'" @click="refreshCursor">
             <RefreshCw :size="17" :class="{ spinning: pageStatus('cursor') === 'scanning' }" />
             刷新
@@ -286,10 +283,6 @@ function refreshCodex() {
 
 function refreshCursor() {
   postToHost({ type: "refreshCursor" });
-}
-
-function openCursorLogin() {
-  postToHost({ type: "openCursorLogin" });
 }
 
 function refreshAntigravity() {

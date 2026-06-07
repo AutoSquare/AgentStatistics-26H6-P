@@ -16,13 +16,28 @@ const trendChart = ref(null);
 const distributionChart = ref(null);
 const costChart = ref(null);
 const selectedAccountId = ref("all");
+const lastActiveAccountId = ref(null);
 let trendInstance = null;
 let distributionInstance = null;
 let costInstance = null;
 let resizeObserver = null;
 let resizeFrame = 0;
 const accountOptions = computed(() => props.payload?.accounts ?? []);
+const sortedAccountOptions = computed(() => accountOptions.value
+    .map((account, index) => ({ account, index }))
+    .sort((left, right) => {
+    if (left.account.isCurrent !== right.account.isCurrent)
+        return left.account.isCurrent ? -1 : 1;
+    return left.index - right.index;
+})
+    .map((item) => item.account));
 const selectedAccount = computed(() => accountOptions.value.find((item) => item.id === selectedAccountId.value) ?? null);
+const currentAccountId = computed(() => {
+    const activeAccountId = props.payload?.activeAccountId;
+    if (activeAccountId && accountOptions.value.some((item) => item.id === activeAccountId))
+        return activeAccountId;
+    return accountOptions.value.find((item) => item.isCurrent)?.id ?? null;
+});
 const effectiveRecords = computed(() => selectedAccount.value?.records ?? props.payload?.records ?? []);
 const hasUsageData = computed(() => effectiveRecords.value.length > 0);
 const showEmptyPanel = computed(() => props.statusKind !== "error" && (!props.payload || !hasUsageData.value));
@@ -90,11 +105,19 @@ function tryRenderCharts() {
 }
 watch(chartView, tryRenderCharts, { immediate: true });
 watch(() => props.active, tryRenderCharts, { immediate: true });
-watch(() => props.payload?.activeAccountId, () => {
-    if (selectedAccountId.value !== "all" && !accountOptions.value.some((item) => item.id === selectedAccountId.value)) {
-        selectedAccountId.value = "all";
+watch(currentAccountId, (accountId) => {
+    const selectedExists = selectedAccountId.value === "all" || accountOptions.value.some((item) => item.id === selectedAccountId.value);
+    if (!accountId) {
+        if (!selectedExists)
+            selectedAccountId.value = "all";
+        lastActiveAccountId.value = null;
+        return;
     }
-});
+    if (!selectedExists || lastActiveAccountId.value !== accountId) {
+        selectedAccountId.value = accountId;
+    }
+    lastActiveAccountId.value = accountId;
+}, { immediate: true });
 watch(() => props.chartWidth, () => {
     if (props.active)
         scheduleChartResize();
@@ -285,7 +308,7 @@ if (__VLS_ctx.accountOptions.length) {
                     return;
                 __VLS_ctx.selectedAccountId = 'all';
             } },
-        ...{ class: "account-card" },
+        ...{ class: "account-card all-account" },
         ...{ class: ({ active: __VLS_ctx.selectedAccountId === 'all' }) },
         type: "button",
     });
@@ -297,7 +320,11 @@ if (__VLS_ctx.accountOptions.length) {
     __VLS_asFunctionalElement(__VLS_intrinsicElements.small, __VLS_intrinsicElements.small)({});
     (__VLS_ctx.allAccountsView?.summary.requestsLabel ?? "0");
     ((__VLS_ctx.allAccountsView?.cost.total ?? 0).toFixed(2));
-    for (const [account] of __VLS_getVForSourceType((__VLS_ctx.accountOptions))) {
+    __VLS_asFunctionalElement(__VLS_intrinsicElements.div, __VLS_intrinsicElements.div)({
+        ...{ class: "account-strip" },
+        'aria-label': "Cursor 账号列表",
+    });
+    for (const [account] of __VLS_getVForSourceType((__VLS_ctx.sortedAccountOptions))) {
         __VLS_asFunctionalElement(__VLS_intrinsicElements.button, __VLS_intrinsicElements.button)({
             ...{ onClick: (...[$event]) => {
                     if (!(__VLS_ctx.accountOptions.length))
@@ -305,15 +332,21 @@ if (__VLS_ctx.accountOptions.length) {
                     __VLS_ctx.selectedAccountId = account.id;
                 } },
             key: (account.id),
-            ...{ class: "account-card" },
+            ...{ class: "account-card account-chip" },
             ...{ class: ({ active: __VLS_ctx.selectedAccountId === account.id }) },
             type: "button",
         });
         __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
             ...{ class: "account-name" },
         });
+        __VLS_asFunctionalElement(__VLS_intrinsicElements.span, __VLS_intrinsicElements.span)({
+            ...{ class: "account-label" },
+        });
         (account.label);
         if (account.isCurrent) {
+            __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
+        }
+        else if (__VLS_ctx.payload?.activeAccountId === account.id) {
             __VLS_asFunctionalElement(__VLS_intrinsicElements.b, __VLS_intrinsicElements.b)({});
         }
         else {
@@ -572,9 +605,13 @@ else if (__VLS_ctx.currentView && __VLS_ctx.hasUsageData) {
 /** @type {__VLS_StyleScopedClasses['text-button']} */ ;
 /** @type {__VLS_StyleScopedClasses['account-section']} */ ;
 /** @type {__VLS_StyleScopedClasses['account-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['all-account']} */ ;
 /** @type {__VLS_StyleScopedClasses['account-name']} */ ;
+/** @type {__VLS_StyleScopedClasses['account-strip']} */ ;
 /** @type {__VLS_StyleScopedClasses['account-card']} */ ;
+/** @type {__VLS_StyleScopedClasses['account-chip']} */ ;
 /** @type {__VLS_StyleScopedClasses['account-name']} */ ;
+/** @type {__VLS_StyleScopedClasses['account-label']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['empty-panel']} */ ;
 /** @type {__VLS_StyleScopedClasses['error']} */ ;
@@ -636,6 +673,7 @@ const __VLS_self = (await import('vue')).defineComponent({
             costChart: costChart,
             selectedAccountId: selectedAccountId,
             accountOptions: accountOptions,
+            sortedAccountOptions: sortedAccountOptions,
             hasUsageData: hasUsageData,
             showEmptyPanel: showEmptyPanel,
             resolvedEmptyDescription: resolvedEmptyDescription,
